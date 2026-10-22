@@ -5,9 +5,10 @@ from pytz import timezone
 from timezonefinder import TimezoneFinder
 import numpy as np
 import os
+from typing import Union
 from pint import Quantity
 
-def create_grid(runtime : datetime, input_data_time : datetime, num_heights : int = 160, min_height_change : Quantity = Quantity(50, "m"), max_height_change : Quantity = Quantity(50, "m"), height_change_exponential_base : float = 1.0, ) -> str:
+def create_grid(runtime : datetime, input_data_time : datetime, num_heights : int = 160, min_height_change : Union[int, float] = 50, max_height_change : Union[int, float] = 50, height_change_exponential_base : float = 1.0, ) -> str:
     timestamp = runtime.strftime("%Y-%m-%d_%H-%M-%S")
     filename = f"{os.path.dirname(os.path.realpath(__file__))}/PBL_MODEL_INPUT_{timestamp}.nc"
     DS = NCDF(filename, "w", format='NETCDF4')
@@ -22,7 +23,7 @@ def create_grid(runtime : datetime, input_data_time : datetime, num_heights : in
 
     ### Calculate grid base parameters ###
 
-    dz = np.minimum(np.full(num_heights-1, min_height_change.to("m").m) * height_change_exponential_base**np.arange(num_heights-1), max_height_change.to("m").m)
+    dz = np.minimum(np.full(num_heights-1, min_height_change) * height_change_exponential_base**np.arange(num_heights-1), max_height_change)
     z = np.append(np.array([0]), dz.cumsum())
 
     ### Construct the variables which handle the dimensions' base values ###
