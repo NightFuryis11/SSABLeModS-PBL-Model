@@ -41,10 +41,11 @@ def make_gif(filename : str):
     z = Dataset["height"]
     model_time = Dataset["model_time"]
     time = Dataset["time"]
-    if os.path.exists("SABRES-PBL-Model/gif-frames/"):
-        shutil.rmtree("SABRES-PBL-Model/gif-frames/")
+    dr = os.path.dirname(os.path.realpath(__file__))
+    if os.path.exists(f"{dr}/gif-frames/"):
+        shutil.rmtree(f"{dr}/gif-frames/")
     
-    os.mkdir("SABRES-PBL-Model/gif-frames/")
+    os.mkdir(f"{dr}/gif-frames/")
 
     for i in [x.astype(np.int32) for x in np.floor(np.linspace(0, len(model_time), 50, endpoint = False))]:
         fig = plt.figure(1, figsize = (12, 18), dpi = 150)
@@ -106,17 +107,17 @@ def make_gif(filename : str):
 
         #fig.legend()
         fig.suptitle(f"Frame {i}", y = 0.9)
-        fig.savefig(f"SABRES-PBL-Model/gif-frames/frame{i:06d}.png", dpi = 150, bbox_inches = "tight")
+        fig.savefig(f"{dr}/gif-frames/frame{i:06d}.png", dpi = 150, bbox_inches = "tight")
         plt.close()
 
-        with Image.open(f"SABRES-PBL-Model/gif-frames/frame{i:06d}.png") as img:
+        with Image.open(f"{dr}/gif-frames/frame{i:06d}.png") as img:
             print(i, img.size)
             padded_img = ImageOps.pad(img, size = (1550,2200), method = Image.Resampling.LANCZOS, color = "white")
         
-        padded_img.save(f"SABRES-PBL-Model/gif-frames/frame{i:06d}.png")
+        padded_img.save(f"{dr}/gif-frames/frame{i:06d}.png")
 
 
-    img_dir = "SABRES-PBL-Model/gif-frames/"
+    img_dir = f"{dr}/gif-frames/"
     images = []
     for file_name in sorted(os.listdir(img_dir)):
         if file_name.endswith('.png'):
@@ -127,7 +128,7 @@ def make_gif(filename : str):
     for _ in range(10):
         images.append(imageio.imread(file_path))
 
-    imageio.mimsave('SABRES-PBL-Model/evolution.gif', images, duration = 5, loop = 65535)
+    imageio.mimsave(f"{dr}/evolution.gif", images, duration = 5, loop = 65535)
 
 def plot_timeseries(filename : str, config : dict, title : str = "Latest_Output", vertical_line : list = [-1]) -> None:
     Dataset = NCDF(filename, "r", format = "NETCDF4")

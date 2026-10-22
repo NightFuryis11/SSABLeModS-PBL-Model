@@ -49,7 +49,7 @@ def create_radiation_database(download_new_data : bool = False) -> None:
 
     wavelength = 1/nu
 
-    DS = NCDF("SABRES-PBL-Model/radiation-data/radiation.nc", "w", format='NETCDF4')
+    DS = NCDF("./radiation-data/radiation.nc", "w", format='NETCDF4')
     DS.title = "SSABLeModS Radiation Database"
     DS.description = "The absorbtivity spectra for the gasses used within the SSABLeModS PBL Model, retrieved via the HITRAN API (HAPI) version 1."
     DS.version = "1.0.0"
@@ -116,8 +116,7 @@ def ground_incoming_shortwave(ToA_incoming_exitance : np.ndarray, current_model_
 
 def get_absorbtion_coefficient(min_wavenumber : Union[int, float, np.ndarray], max_wavenumber : Union[int, float, np.ndarray], gasses = list[str]) -> list[np.ndarray]:
     ret = []
-    dr = os.path.dirname(os.path.realpath(__file__))
-    Data = NCDF(f"{dr}/radiation-data/radiation.nc", "r", format='NETCDF4')
+    Data = NCDF("./radiation-data/radiation.nc", "r", format='NETCDF4')
     wavenumber = Data["wavenumber"][:]
     selection = (wavenumber >= min_wavenumber) & (wavenumber <= max_wavenumber)
 

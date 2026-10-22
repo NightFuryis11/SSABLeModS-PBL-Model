@@ -487,6 +487,13 @@ def run_model(config : dict, prepared_filename : str, **kwargs) -> str:
 if __name__ == "__main__":
     config = get_config()
 
+    if not os.path.exists("./radiation-data/radiation.nc"):
+        os.mkdir("./radiation-data")
+        new_data = False
+        if not os.path.exists("./local_radiation_data"):
+            new_data = True
+        radiation.create_radiation_database(new_data)
+
     #dummy_datetime = datetime(2025, 10, 16, 0).replace(tzinfo = timezone("UTC"))
     #dummy_inputs = {"z" : [0, 25, 50, 75], "u_g" : 5, "v_g" : 5, "T" : [280, 282, 284, 286], "p" : [1000, 995, 990, 985], "u_bar" : [0, 2, 4, 6], "v_bar" : [0, 2, 4, 6]}
     #filename = ingest.ingest_1d(config, dummy_datetime, dummy_inputs)
