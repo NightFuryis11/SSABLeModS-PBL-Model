@@ -211,3 +211,4 @@ __marimo__/
 *.png
 *.gif
 *.test.py
+*.backup.py

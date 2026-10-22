@@ -1,7 +1,7 @@
 from netCDF4 import Dataset as NCDF
 from pint import Quantity
 import dynamics
-import physics
+import constants
 from typing import Union
 import numpy as np
 from scipy import interpolate
@@ -11,9 +11,32 @@ from pytz import timezone
 import shutil
 import os
 import pandas as pd
-from siphon.simplewebservice.wyoming import WyomingUpperAir
+from siphon.simplewebservice.igra2 import IGRAUpperAir
 import sys
 from timezonefinder import TimezoneFinder
+from utility_equations import _ensure_arrays, hypsometric_Z_to_P
+import thermo
+
+def pressure_reference_levels(ref_z : Union[int, float, np.ndarray], z : Union[int, float, np.ndarray], p : Union[int, float, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    ref_z = _ensure_arrays(ref_z)
+    z = _ensure_arrays(z)
+    p = _ensure_arrays(p)
+
+    ref_p = []
+    is_below = []
+
+    for i in range(len(ref_z)):
+        level = np.where(z >= ref_z[i])[0][0]
+        ref_p.append(p[level])
+        if (z[level] > ref_z[i]) and not (level == 0):
+            level -= 1
+            is_below.append(False)
+        elif (z[level] == ref_z[i]):
+            is_below.append(False)
+        else:
+            is_below.append(True)
+        
+    return ref_p, np.array(is_below)
 
 def ingest_file(config : dict, input_filename : str, input_data_time : datetime = datetime.now(tz = timezone("UTC")), column_names : list = None) -> str:
     input_vals = {}
@@ -62,35 +85,53 @@ def ingest_file(config : dict, input_filename : str, input_data_time : datetime 
 def ingest_sounding(config : dict, input_data_time : datetime, station : str) -> str:
     input_vals = {}
 
-    data = WyomingUpperAir.request_data(input_data_time, station)
-    input_vals["z"] = Quantity(data["height"].values, "m")
-    input_vals["p"] = Quantity(data["pressure"].values, "hPa")
-    input_vals["T"] = Quantity(data["temperature"].values + 273.15, "K")
-    input_vals["T_d"] = Quantity(data["dewpoint"].values + 273.15, "K")
+    stations = pd.read_fwf("https://www.ncei.noaa.gov/pub/data/igra/igra2-station-list.txt", header = None, names = ["ID", "lat", "lon", "elevation", "loc", "start_year", "end_year", "num"], widths = [11, 9, 10, 7, 34, 5, 5, 7])
+    station_data = stations.loc[stations["ID"].str.contains(station, na=False, case=True)]
+    station_row  = station_data.index[0]
+    station_id = station_data.loc[station_row, "ID"]
+    data, header = IGRAUpperAir.request_data(input_data_time, station_id)
+    input_vals["z"] = data["height"].values
+    input_vals["p"] = Quantity(data["pressure"].values, data.units["pressure"]).to("Pa").to_base_units().m
+    input_vals["T"] = data["temperature"].values + 273.15
+    input_vals["T_d"] = data["dewpoint"].values + 273.15
 
-    input_vals["lat"] = Quantity(data["latitude"].values[0], "degrees")
-    input_vals["lon"] = Quantity(data["longitude"].values[0], "degrees")
+    input_vals["lat"] = header["latitude"].values[0]
+    input_vals["lon"] = header["longitude"].values[0]
+
+    mask = ~np.isnan(input_vals["T"])
+
+    input_vals["z"] = input_vals["z"][mask]
+    input_vals["p"] = input_vals["p"][mask]
+    input_vals["T"] = input_vals["T"][mask]
+    input_vals["T_d"] = input_vals["T_d"][mask]
+
+    reorder = np.argsort(input_vals["z"])
+
+    input_vals["z"] = input_vals["z"][reorder]
+    input_vals["p"] = input_vals["p"][reorder]
+    input_vals["T"] = input_vals["T"][reorder]
+    input_vals["T_d"] = input_vals["T_d"][reorder]
     
     output_filename = ingest_1d(config, input_data_time, input_vals)
     return output_filename
 
 def ingest_1d(config : dict, input_data_time : datetime, input_vals : dict) -> str:
-    in_z = dynamics._ensure_unit_aware_arrays(input_vals["z"], "m")
-    in_T = dynamics._ensure_unit_aware_arrays(input_vals["T"], "K")
-    in_p = dynamics._ensure_unit_aware_arrays(input_vals["p"], "Pa")
+    in_z = _ensure_arrays(input_vals["z"])
+    in_T = _ensure_arrays(input_vals["T"])
+    in_p = _ensure_arrays(input_vals["p"])
 
     if config["constant_geostrophic_flow"]:
-        in_u_g = dynamics._ensure_unit_aware_arrays(config["geostrophic_u"], "m s^(-1)")
-        in_v_g = dynamics._ensure_unit_aware_arrays(config["geostrophic_v"], "m s^(-1)")
+        in_u_g = _ensure_arrays(config["geostrophic_u"])
+        in_v_g = _ensure_arrays(config["geostrophic_v"])
     else:
         if "u_g" in input_vals.keys():
-            in_u_g = dynamics._ensure_unit_aware_arrays(input_vals["u_g"], "m s^(-1)")
+            in_u_g = _ensure_arrays(input_vals["u_g"])
         else:
-            in_u_g = Quantity(0, "m s^(-1)")
+            in_u_g = 0
         if "v_g" in input_vals.keys():
-            in_v_g = dynamics._ensure_unit_aware_arrays(input_vals["v_g"], "m s^(-1)")
+            in_v_g = _ensure_arrays(input_vals["v_g"])
         else:
-            in_v_g = Quantity(0, "m s^(-1)")
+            in_v_g = 0
 
     if "lat" in input_vals.keys():
         in_lat = input_vals["lat"]
@@ -103,45 +144,37 @@ def ingest_1d(config : dict, input_data_time : datetime, input_vals : dict) -> s
         in_lon = config["default_lon"]
 
     if "u_bar" in input_vals.keys():
-        in_u_bar = input_vals["u_bar"]
-        in_u_bar = dynamics._ensure_unit_aware_arrays(in_u_bar, "m s^(-1)")
+        in_u_bar = _ensure_arrays(input_vals["u_bar"])
     else:
-        in_u_bar = Quantity(np.array([0]), "m s^(-1)")
+        in_u_bar = np.array([0])
     
     if "v_bar" in input_vals.keys():
-        in_v_bar = input_vals["v_bar"]
-        in_v_bar = dynamics._ensure_unit_aware_arrays(in_v_bar, "m s^(-1)")
+        in_v_bar = _ensure_arrays(input_vals["v_bar"])
     else:
-        in_v_bar = Quantity(np.array([0]), "m s^(-1)")
+        in_v_bar = np.array([0])
 
     if "r_v" in input_vals.keys():
-        in_r_v = input_vals["r_v"]
-        in_r_v = dynamics._ensure_unit_aware_arrays(in_r_v, "kg kg^(-1)")
+        in_r_v = _ensure_arrays(input_vals["r_v"])
     elif "e" in input_vals.keys():
-        in_e = input_vals["e"]
-        in_e = dynamics._ensure_unit_aware_arrays(in_e, "Pa")
+        in_e = _ensure_arrays(input_vals["e"])
         
-        in_r_v = dynamics.r_v_from_e(in_e, in_p)
+        in_r_v = thermo.r_v_from_e(in_e, in_p)
     elif "RH" in input_vals.keys():
-        in_RH = input_vals["RH"]
-        in_RH = dynamics._ensure_unit_aware_arrays(in_RH, "dimensionless")
+        in_RH = _ensure_arrays(input_vals["RH"])
         
-        in_r_v = dynamics.r_v_from_RH(in_T, in_RH)
+        in_r_v = thermo.r_v_from_RH(in_T, in_RH)
     elif "T_d" in input_vals.keys():
-        in_T_d = input_vals["T_d"]
-        in_T_d = dynamics._ensure_unit_aware_arrays(in_T_d, "K")
+        in_T_d = _ensure_arrays(input_vals["T_d"])
         
-        in_r_v = dynamics.r_v_from_T_d(in_T_d, in_p)
+        in_r_v = thermo.r_v_from_T_d(in_T_d, in_p)
     elif "q_v" in input_vals.keys():
-        in_q_v = input_vals["q_v"]
-        in_q_v = dynamics._ensure_unit_aware_arrays(in_q_v, "kg kg^(-1)")
+        in_q_v = _ensure_arrays(input_vals["q_v"])
         
-        in_r_v = dynamics.r_v_from_e(dynamics.e_from_q_v(in_q_v, in_p), in_p)
+        in_r_v = thermo.r_v_from_e(thermo.e_from_q_v(in_q_v, in_p), in_p)
     elif "rho_v" in input_vals.keys():
-        in_rho_v = input_vals["rho_v"]
-        in_rho_v = dynamics._ensure_unit_aware_arrays(in_rho_v, "kg m^(-2)")
+        in_rho_v = _ensure_arrays(input_vals["rho_v"])
         
-        in_r_v = dynamics.r_v_from_e(dynamics.e_from_rho_v(in_rho_v, in_T), in_p)
+        in_r_v = thermo.r_v_from_e(thermo.e_from_rho_v(in_rho_v, in_T), in_p)
     else:
         print("No moisture variable found.")
         in_r_v = Quantity(np.full(in_z.shape, 0), "kg kg^(-1)")
@@ -149,17 +182,16 @@ def ingest_1d(config : dict, input_data_time : datetime, input_vals : dict) -> s
     in_z_s = config["starting_surface_layer_depth"]
     in_z_i = config["starting_boundary_layer_depth"]
 
-    intended_dz = np.minimum(np.full(config["num_heights"]-1, config["min_height_change"].to("m").m) * config["height_change_exponential_base"]**np.arange(config["num_heights"]-1), config["max_height_change"].to("m").m)
+    intended_dz = np.minimum(np.full(config["num_heights"]-1, config["min_height_change"]) * config["height_change_exponential_base"]**np.arange(config["num_heights"]-1), config["max_height_change"])
     intended_z = np.append(np.array([0]), intended_dz.cumsum())
 
     if np.min(in_z):
-        in_p_0m = dynamics.hypsometric_Z_to_P(in_T[0], 0, in_z[0], in_r_v[0], in_p[0], True)
-        in_z = Quantity(np.insert(in_z.m, 0, 0), in_z.units)
-        in_T = Quantity(np.insert(in_T.m, 0, in_T[0].m), in_T.units)
-        in_r_v = Quantity(np.insert(in_r_v.m, 0, in_r_v[0].m), in_r_v.units)
-        in_p = Quantity(np.insert(in_p.m, 0, in_p_0m.to(in_p.units).m), in_p.units)
+        in_p_0m = hypsometric_Z_to_P(in_T[0], 0, in_z[0], in_r_v[0], in_p[0], True)
+        in_z = np.insert(in_z, 0, 0)
+        in_T = np.insert(in_T, 0, in_T[0])
+        in_r_v = np.insert(in_r_v, 0, in_r_v[0])
+        in_p = np.insert(in_p, 0, in_p_0m)
 
-    intended_z = Quantity(intended_z, "m")
     intended_z = intended_z[intended_z <= np.max(in_z)]
 
     # Initialize the grid
@@ -167,67 +199,66 @@ def ingest_1d(config : dict, input_data_time : datetime, input_vals : dict) -> s
     DS = NCDF(filename, "r", format = "NETCDF4")
 
     # Interpolate values to the desired heights
-    interp_z = DS["height"][:]
-    interp_z = Quantity(DS["height"][:].data, DS["height"].units)
+    interp_z = DS["height"][:].data
 
-    interp_T = Quantity(interpolate.interp1d(in_z, in_T)(interp_z), in_T.units)
-    interp_r_v = Quantity(interpolate.interp1d(in_z, in_r_v)(interp_z), in_r_v.units)
+    interp_T = interpolate.interp1d(in_z, in_T)(interp_z)
+    interp_r_v = interpolate.interp1d(in_z, in_r_v)(interp_z)
     if in_u_g.size == 1:
-        interp_u_g = Quantity(np.full(interp_z.shape, in_u_g.m), in_u_g.units)
+        interp_u_g = np.full(interp_z.shape, in_u_g)
     else:
-        interp_u_g = Quantity(interpolate.interp1d(in_z, in_u_g)(interp_z), in_u_g.units)
+        interp_u_g = interpolate.interp1d(in_z, in_u_g)(interp_z)
     if in_v_g.size == 1:
-        interp_v_g = Quantity(np.full(interp_z.shape, in_v_g.m), in_v_g.units)
+        interp_v_g = np.full(interp_z.shape, in_v_g)
     else:
-        interp_v_g = Quantity(interpolate.interp1d(in_z, in_v_g)(interp_z), in_v_g.units)
+        interp_v_g = interpolate.interp1d(in_z, in_v_g)(interp_z)
     if in_u_bar.size == 1:
-        interp_u_bar = Quantity(np.full(interp_z.shape, in_u_bar.m), in_u_bar.units)
+        interp_u_bar = np.full(interp_z.shape, in_u_bar)
     else:
-        interp_u_bar = Quantity(interpolate.interp1d(in_z, in_u_bar)(interp_z), in_u_bar.units)
+        interp_u_bar = interpolate.interp1d(in_z, in_u_bar)(interp_z)
     if in_v_bar.size == 1:
-        interp_v_bar = Quantity(np.full(interp_z.shape, in_v_bar.m), in_v_bar.units)
+        interp_v_bar = np.full(interp_z.shape, in_v_bar)
     else:
-        interp_v_bar = Quantity(interpolate.interp1d(in_z, in_v_bar)(interp_z), in_v_bar.units)
+        interp_v_bar = interpolate.interp1d(in_z, in_v_bar)(interp_z)
 
-    ref_p, is_downward = dynamics.pressure_reference_levels(interp_z, in_z, in_p)
+    ref_p, is_downward = pressure_reference_levels(interp_z, in_z, in_p)
 
-    interp_p = dynamics.hypsometric_Z_to_P((interp_T[:-1] + interp_T[1:])/2, interp_z[:-1], interp_z[1:], (interp_r_v[:-1] + interp_r_v[1:])/2, ref_p[0], is_downward)
-    interp_p = Quantity(np.insert(interp_p.m, 0, ref_p[0].to(interp_p.units).m), interp_p.units)
+    interp_p = hypsometric_Z_to_P((interp_T[:-1] + interp_T[1:])/2, interp_z[:-1], interp_z[1:], (interp_r_v[:-1] + interp_r_v[1:])/2, ref_p[0], is_downward)
+    interp_p = np.insert(interp_p, 0, ref_p[0])
 
-    interp_theta = dynamics.poissons_T_to_theta(interp_T, interp_p, interp_r_v)
+    interp_theta = thermo.poissons_T_to_theta(interp_T, interp_p, interp_r_v)
 
     DS.close()
     # Add new variables here for the wind, temp, pressure, etc.
     DS = NCDF(filename, "a", format = "NETCDF4")
 
     tz_var = DS.createVariable("timezone", str)
-    DS["timezone"][0] = TimezoneFinder().timezone_at(lng = in_lon.m, lat = in_lat.m)
+    DS["timezone"][0] = TimezoneFinder().timezone_at(lng = in_lon, lat = in_lat)
 
-    lat_var = DS.createVariable("latitude", np.float32)
+    lat_var = DS.createVariable("latitude", np.float64)
     lat_var.units = "degrees north"
-    DS["latitude"][:] = in_lat.m
+    DS["latitude"][:] = in_lat
 
-    lon_var = DS.createVariable("longitude", np.float32)
+    lon_var = DS.createVariable("longitude", np.float64)
     lon_var.units = "degrees east"
-    DS["longitude"][:] = in_lon.m
+    DS["longitude"][:] = in_lon
 
-    z_s_var = DS.createVariable("surface_layer_height", np.float32, ("time"))
+    z_s_var = DS.createVariable("surface_layer_height", np.float64, ("time"))
     z_s_var.units = "m"
     DS["surface_layer_height"][0] = in_z_s
 
-    z_i_var = DS.createVariable("pbl_top_height", np.float32, ("time"))
+    z_i_var = DS.createVariable("pbl_top_height", np.float64, ("time"))
     z_i_var.units = "m"
     DS["pbl_top_height"][0] = in_z_i
 
-    u_star_var = DS.createVariable("u_star", np.float32, ("time"))
+    u_star_var = DS.createVariable("u_star", np.float64, ("time"))
     u_star_var.units = "m s^(-1)"
     DS["u_star"][0] = 0
 
-    theta_star_var = DS.createVariable("theta_star", np.float32, ("time"))
+    theta_star_var = DS.createVariable("theta_star", np.float64, ("time"))
     theta_star_var.units = "K"
     DS["theta_star"][0] = 0
 
-    r_v_star_var = DS.createVariable("r_v_star", np.float32, ("time"))
+    r_v_star_var = DS.createVariable("r_v_star", np.float64, ("time"))
     r_v_star_var.units = "kg kg^(-1)"
     DS["r_v_star"][0] = 0
 
@@ -237,154 +268,154 @@ def ingest_1d(config : dict, input_data_time : datetime, input_vals : dict) -> s
 
     irr_var = DS.createVariable("net_irradiance", np.float64, ("time", "z"))
     irr_var.units = "W m^(-2)"
-    DS["net_irradiance"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["net_irradiance"][0,:] = np.zeros(interp_z.size)[:]
 
     #M_var = DS.createVariable("transmitting_exitance", np.float64, ("time", "dz"))
     #M_var.units = "W m^(-1)"
     #DS["transmitting_exitance"][0,:] = np.zeros(interp_z.m.size-1)[:]
 
-    L_var = DS.createVariable("monin_obukhov_length_scale", np.float32, ("time"))
+    L_var = DS.createVariable("monin_obukhov_length_scale", np.float64, ("time"))
     L_var.units = "m"
     DS["monin_obukhov_length_scale"][0] = 0
 
-    p_var = DS.createVariable("pressure", np.float32, ("time", "z"))
+    p_var = DS.createVariable("pressure", np.float64, ("time", "z"))
     p_var.units = "Pa"
     DS["pressure"][0,:] = interp_p[:]
     
-    T_var = DS.createVariable("temperature", np.float32, ("time", "z"))
+    T_var = DS.createVariable("temperature", np.float64, ("time", "z"))
     T_var.units = "K"
     DS["temperature"][0,:] = interp_T[:]
 
-    r_v_var = DS.createVariable("mixing_ratio", np.float32, ("time", "z"))
+    r_v_var = DS.createVariable("mixing_ratio", np.float64, ("time", "z"))
     r_v_var.units = "kg kg^(-1)"
     DS["mixing_ratio"][0,:] = interp_r_v[:]
 
-    rho_var = DS.createVariable("density", np.float32, ("time", "z"))
+    rho_var = DS.createVariable("density", np.float64, ("time", "z"))
     rho_var.units = "kg m^(-3)"
-    DS["density"][0,:] = interp_p[:] / (physics.R_d * interp_T[:] * (1 + 0.608 * interp_r_v[:]))
+    DS["density"][0,:] = interp_p[:] / (constants.R_d * interp_T[:] * (1 + 0.608 * interp_r_v[:]))
 
-    r_vs_var = DS.createVariable("saturation_mixing_ratio", np.float32, ("time", "z"))
+    r_vs_var = DS.createVariable("saturation_mixing_ratio", np.float64, ("time", "z"))
     r_vs_var.units = "kg kg^(-1)"
-    DS["saturation_mixing_ratio"][0,:] = dynamics.r_v_from_e(dynamics.calc_e_s(interp_T[:]), interp_p[:])
+    DS["saturation_mixing_ratio"][0,:] = thermo.r_v_from_e(thermo.calc_e_s(interp_T[:]), interp_p[:])
 
-    theta_var = DS.createVariable("potential_temperature", np.float32, ("time", "z"))
+    theta_var = DS.createVariable("potential_temperature", np.float64, ("time", "z"))
     theta_var.units = "K"
     DS["potential_temperature"][0,:] = interp_theta[:]
 
-    sw_red_var = DS.createVariable("shortwave_reduction", np.float32, ("time"))
+    sw_red_var = DS.createVariable("shortwave_reduction", np.float64, ("time"))
     DS["shortwave_reduction"][0] = 0
 
-    dpdt_var = DS.createVariable("dpdt", np.float32, ("time", "z"))
+    dpdt_var = DS.createVariable("dpdt", np.float64, ("time", "z"))
     dpdt_var.units = "Pa s^(-1)"
-    DS["dpdt"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["dpdt"][0,:] = np.zeros(interp_z.size)[:]
 
-    e_var = DS.createVariable("vapor_pressure", np.float32, ("time", "z"))
+    e_var = DS.createVariable("vapor_pressure", np.float64, ("time", "z"))
     e_var.units = "Pa"
-    DS["vapor_pressure"][0,:] = dynamics.e_from_r_v(interp_r_v[:], interp_p[:])
+    DS["vapor_pressure"][0,:] = thermo.e_from_r_v(interp_r_v[:], interp_p[:])
 
-    u_g_var = DS.createVariable("u-component_of_geostrophic_wind", np.float32, ("time", "z"))
+    u_g_var = DS.createVariable("u-component_of_geostrophic_wind", np.float64, ("time", "z"))
     u_g_var.units = "m s^(-1)"
     DS["u-component_of_geostrophic_wind"][0,:] = interp_u_g[:]
 
-    v_g_var = DS.createVariable("v-component_of_geostrophic_wind", np.float32, ("time", "z"))
+    v_g_var = DS.createVariable("v-component_of_geostrophic_wind", np.float64, ("time", "z"))
     v_g_var.units = "m s^(-1)"
     DS["v-component_of_geostrophic_wind"][0,:] = interp_v_g[:]
 
-    u_bar_var = DS.createVariable("u-component_of_mean_wind", np.float32, ("time", "z"))
+    u_bar_var = DS.createVariable("u-component_of_mean_wind", np.float64, ("time", "z"))
     u_bar_var.units = "m s^(-1)"
     DS["u-component_of_mean_wind"][0,:] = interp_u_bar[:]
 
-    v_bar_var = DS.createVariable("v-component_of_mean_wind", np.float32, ("time", "z"))
+    v_bar_var = DS.createVariable("v-component_of_mean_wind", np.float64, ("time", "z"))
     v_bar_var.units = "m s^(-1)"
     DS["v-component_of_mean_wind"][0,:] = interp_v_bar[:]
 
-    u_ag_var = DS.createVariable("u-component_of_ageostrophic_wind", np.float32, ("time", "z"))
+    u_ag_var = DS.createVariable("u-component_of_ageostrophic_wind", np.float64, ("time", "z"))
     u_ag_var.units = "m s^(-1)"
     DS["u-component_of_ageostrophic_wind"][0,:] = interp_u_bar[:] - interp_u_g[:]
 
-    v_ag_var = DS.createVariable("v-component_of_ageostrophic_wind", np.float32, ("time", "z"))
+    v_ag_var = DS.createVariable("v-component_of_ageostrophic_wind", np.float64, ("time", "z"))
     v_ag_var.units = "m s^(-1)"
     DS["v-component_of_ageostrophic_wind"][0,:] = interp_v_bar[:] - interp_v_g[:]
 
-    duagdt_var = DS.createVariable("duagdt", np.float32, ("time", "z"))
+    duagdt_var = DS.createVariable("duagdt", np.float64, ("time", "z"))
     duagdt_var.units = "m s^(-2)"
-    DS["duagdt"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["duagdt"][0,:] = np.zeros(interp_z.size)[:]
 
-    dvagdt_var = DS.createVariable("dvagdt", np.float32, ("time", "z"))
+    dvagdt_var = DS.createVariable("dvagdt", np.float64, ("time", "z"))
     dvagdt_var.units = "m s^(-2)"
-    DS["dvagdt"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["dvagdt"][0,:] = np.zeros(interp_z.size)[:]
 
-    dugdt_var = DS.createVariable("dugdt", np.float32, ("time", "z"))
+    dugdt_var = DS.createVariable("dugdt", np.float64, ("time", "z"))
     dugdt_var.units = "m s^(-2)"
-    DS["dugdt"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["dugdt"][0,:] = np.zeros(interp_z.size)[:]
 
-    dvgdt_var = DS.createVariable("dvgdt", np.float32, ("time", "z"))
+    dvgdt_var = DS.createVariable("dvgdt", np.float64, ("time", "z"))
     dvgdt_var.units = "m s^(-2)"
-    DS["dvgdt"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["dvgdt"][0,:] = np.zeros(interp_z.size)[:]
 
-    dudt_var = DS.createVariable("dudt", np.float32, ("time", "z"))
+    dudt_var = DS.createVariable("dudt", np.float64, ("time", "z"))
     dudt_var.units = "m s^(-2)"
-    DS["dudt"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["dudt"][0,:] = np.zeros(interp_z.size)[:]
 
-    dvdt_var = DS.createVariable("dvdt", np.float32, ("time", "z"))
+    dvdt_var = DS.createVariable("dvdt", np.float64, ("time", "z"))
     dvdt_var.units = "m s^(-2)"
-    DS["dvdt"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["dvdt"][0,:] = np.zeros(interp_z.size)[:]
 
-    dthetadt_var = DS.createVariable("dthetadt", np.float32, ("time", "z"))
+    dthetadt_var = DS.createVariable("dthetadt", np.float64, ("time", "z"))
     dthetadt_var.units = "K s^(-1)"
-    DS["dthetadt"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["dthetadt"][0,:] = np.zeros(interp_z.size)[:]
 
-    dTdt_var = DS.createVariable("dTdt", np.float32, ("time", "z"))
+    dTdt_var = DS.createVariable("dTdt", np.float64, ("time", "z"))
     dTdt_var.units = "K s^(-1)"
-    DS["dTdt"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["dTdt"][0,:] = np.zeros(interp_z.size)[:]
 
-    dr_vdt_var = DS.createVariable("dr_vdt", np.float32, ("time", "z"))
+    dr_vdt_var = DS.createVariable("dr_vdt", np.float64, ("time", "z"))
     dr_vdt_var.units = "kg kg^(-1) s^(-1)"
-    DS["dr_vdt"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["dr_vdt"][0,:] = np.zeros(interp_z.size)[:]
 
-    uw_var = DS.createVariable("u-momentum_flux", np.float32, ("time", "dz"))
+    uw_var = DS.createVariable("u-momentum_flux", np.float64, ("time", "dz"))
     uw_var.units = "m^(2) s^(-2)"
-    DS["u-momentum_flux"][0,:] = np.zeros(interp_z.m.size-1)[:]
+    DS["u-momentum_flux"][0,:] = np.zeros(interp_z.size-1)[:]
 
-    vw_var = DS.createVariable("v-momentum_flux", np.float32, ("time", "dz"))
+    vw_var = DS.createVariable("v-momentum_flux", np.float64, ("time", "dz"))
     vw_var.units = "m^(2) s^(-2)"
-    DS["v-momentum_flux"][0,:] = np.zeros(interp_z.m.size-1)[:]
+    DS["v-momentum_flux"][0,:] = np.zeros(interp_z.size-1)[:]
 
-    thetaw_var = DS.createVariable("potential_temperature_flux", np.float32, ("time", "dz"))
+    thetaw_var = DS.createVariable("potential_temperature_flux", np.float64, ("time", "dz"))
     thetaw_var.units = "K m s^(-1)"
-    DS["potential_temperature_flux"][0,:] = np.zeros(interp_z.m.size-1)[:]
+    DS["potential_temperature_flux"][0,:] = np.zeros(interp_z.size-1)[:]
 
-    r_vw_var = DS.createVariable("moisture_flux", np.float32, ("time", "dz"))
+    r_vw_var = DS.createVariable("moisture_flux", np.float64, ("time", "dz"))
     r_vw_var.units = "kg m kg^(-1) s^(-1)"
-    DS["moisture_flux"][0,:] = np.zeros(interp_z.m.size-1)[:]
+    DS["moisture_flux"][0,:] = np.zeros(interp_z.size-1)[:]
 
-    Tw_var = DS.createVariable("temperature_flux", np.float32, ("time", "dz"))
+    Tw_var = DS.createVariable("temperature_flux", np.float64, ("time", "dz"))
     Tw_var.units = "K m s^(-1)"
-    DS["temperature_flux"][0,:] = np.zeros(interp_z.m.size-1)[:]
+    DS["temperature_flux"][0,:] = np.zeros(interp_z.size-1)[:]
 
-    km_var = DS.createVariable("eddy_momentum_diffusivity", np.float32, ("time", "dz"))
+    km_var = DS.createVariable("eddy_momentum_diffusivity", np.float64, ("time", "dz"))
     km_var.units = "m^(2) s^(-1)"
-    DS["eddy_momentum_diffusivity"][0,:] = np.zeros(interp_z.m.size-1)[:]
+    DS["eddy_momentum_diffusivity"][0,:] = np.zeros(interp_z.size-1)[:]
 
-    kh_var = DS.createVariable("eddy_heat_diffusivity", np.float32, ("time", "dz"))
+    kh_var = DS.createVariable("eddy_heat_diffusivity", np.float64, ("time", "dz"))
     kh_var.units = "m^(2) s^(-1)"
-    DS["eddy_heat_diffusivity"][0,:] = np.zeros(interp_z.m.size-1)[:]
+    DS["eddy_heat_diffusivity"][0,:] = np.zeros(interp_z.size-1)[:]
 
-    puwpz_var = DS.createVariable("differential_u-momentum_flux", np.float32, ("time", "z"))
+    puwpz_var = DS.createVariable("differential_u-momentum_flux", np.float64, ("time", "z"))
     puwpz_var.units = "m s^(-2)"
-    DS["differential_u-momentum_flux"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["differential_u-momentum_flux"][0,:] = np.zeros(interp_z.size)[:]
 
-    pvwpz_var = DS.createVariable("differential_v-momentum_flux", np.float32, ("time", "z"))
+    pvwpz_var = DS.createVariable("differential_v-momentum_flux", np.float64, ("time", "z"))
     pvwpz_var.units = "m s^(-2)"
-    DS["differential_v-momentum_flux"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["differential_v-momentum_flux"][0,:] = np.zeros(interp_z.size)[:]
 
-    pthetawpz_var = DS.createVariable("differential_potential_temperature_flux", np.float32, ("time", "z"))
+    pthetawpz_var = DS.createVariable("differential_potential_temperature_flux", np.float64, ("time", "z"))
     pthetawpz_var.units = "K s^(-1)"
-    DS["differential_potential_temperature_flux"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["differential_potential_temperature_flux"][0,:] = np.zeros(interp_z.size)[:]
 
-    pr_vwpt_var = DS.createVariable("differential_moisture_flux", np.float32, ("time", "z"))
+    pr_vwpt_var = DS.createVariable("differential_moisture_flux", np.float64, ("time", "z"))
     pr_vwpt_var.units = "kg kg^(-1) s^(-1)"
-    DS["differential_moisture_flux"][0,:] = np.zeros(interp_z.m.size)[:]
+    DS["differential_moisture_flux"][0,:] = np.zeros(interp_z.size)[:]
 
     DS.close()
     print(f"Successfully ingested data to {filename}")

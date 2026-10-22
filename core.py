@@ -8,7 +8,10 @@ from pytz import timezone
 import grid
 import ingest
 import dynamics
-import physics
+import constants
+import radiation
+import thermo
+import turbulence
 from pint import Quantity
 import matplotlib.pyplot as plt
 from timezonefinder import TimezoneFinder
@@ -17,266 +20,15 @@ import pandas as pd
 from time import sleep
 import shutil
 from scipy import interpolate
-import gif
+import figures
+from utility_equations import _ensure_arrays, get_config
 
 np.set_printoptions(linewidth=350)
-
-def get_config(filepath : str = f"{os.path.dirname(os.path.realpath(__file__))}/pbl.config") -> Union[dict, None]:
-    if os.path.exists(filepath):
-        cfg_dict = {}
-        with open(filepath, "r") as F:
-            for line in F.readlines():
-                if line =="\n":
-                    pass
-                elif line.startswith("#") or line.startswith("\\"):
-                    pass
-                else:
-                    splitline = line.split("=")
-                    val, unit, datatype = [x.strip() for x in splitline[1].split(",")]
-                    if datatype == "int":
-                        cfg_dict[f"{splitline[0].strip()}"] = int(val)
-                    elif datatype == "float":
-                        cfg_dict[f"{splitline[0].strip()}"] = float(val)
-                    elif datatype == "bool":
-                        cfg_dict[f"{splitline[0].strip()}"] = bool(int(val))
-                    
-                    if not unit == "":
-                        cfg_dict[f"{splitline[0].strip()}"] = Quantity(cfg_dict[f"{splitline[0].strip()}"], unit)
-        return cfg_dict
-    else:
-        return None
-
-def plot_timeseries(filename : str, title : str = "Latest_Output", vertical_line : list = [-1]) -> None:
-    Dataset = NCDF(filename, "r", format = "NETCDF4")
-
-    z = Dataset["height"]
-    dz = Dataset["height_change"]
-    p = Dataset["pressure"]
-    dpdt = Dataset["dpdt"]
-    T = Dataset["temperature"]
-    theta = Dataset["potential_temperature"]
-    r_v = Dataset["mixing_ratio"]
-    dr_vdt = Dataset["dr_vdt"]
-    u_g = Dataset["u-component_of_geostrophic_wind"]
-    v_g = Dataset["v-component_of_geostrophic_wind"]
-    u_bar = Dataset["u-component_of_mean_wind"]
-    v_bar = Dataset["v-component_of_mean_wind"]
-    dudt = Dataset["dudt"]
-    dvdt = Dataset["dvdt"]
-    dthetadt = Dataset["dthetadt"]
-    z_s = Dataset["surface_layer_height"]
-    z_i = Dataset["pbl_top_height"]
-    dz_idt = Dataset["dz_idt"]
-    uw = Dataset["u-momentum_flux"]
-    vw = Dataset["v-momentum_flux"]
-    thetaw = Dataset["potential_temperature_flux"]
-    K_m = Dataset["eddy_momentum_diffusivity"]
-    K_h = Dataset["eddy_heat_diffusivity"]
-    puwpz = Dataset["differential_u-momentum_flux"]
-    pvwpz = Dataset["differential_v-momentum_flux"]
-    pthetawpz = Dataset["differential_potential_temperature_flux"]
-    pr_vwpz = Dataset["differential_moisture_flux"]
-    r_vw = Dataset["moisture_flux"]
-    data_time = Dataset["time"]
-    model_time = Dataset["model_time"]
-    shortwave_reduction = Dataset["shortwave_reduction"]
-    SW_in = Dataset["incoming_solar_radiation"]
-    data_tz = Dataset["timezone"][0]
-
-    if "lat" in Dataset.variables.keys():
-        lat = Dataset["lat"]
-    else:
-        lat = config["default_lat"]
-    
-    if "lon" in Dataset.variables.keys():
-        lon = Dataset["lon"]
-    else:
-        lon = config["default_lon"]
-
-    local_time = np.array([num2date(x, data_time.units, only_use_cftime_datetimes=False).replace(tzinfo = timezone("UTC")).astimezone(timezone(data_tz)).strftime("%Y-%m-%d %H:%M:%S") for x in data_time[:].data])
-
-    #fig3 = plt.figure(3)
-    #ax100 = fig3.add_subplot(111)
-    #moisture_sum = np.sum(r_v[:,:], axis = 1)
-    #ax100.plot(local_time[100::], moisture_sum[100::], color = "green")
-    #fig3.savefig("SABRES-PBL-Model/Latest_Output_Moisture_Sum.png", dpi = 150, bbox_inches = "tight")
-
-
-    fig = plt.figure(1, figsize = (20, 10))
-    #ax1 = fig.add_subplot(4, 3, 1)
-    #ax2 = fig.add_subplot(4, 3, 2)
-    #ax3 = fig.add_subplot(4, 3, 3)
-    #ax4 = fig.add_subplot(4, 3, (4, 6))
-    #ax5 = fig.add_subplot(4, 3, (7, 9))
-    #ax6 = fig.add_subplot(4, 3, (10, 12))
-
-    ax1 = fig.add_subplot(4, 3, 3)
-    ax2 = fig.add_subplot(4, 3, 6)
-    ax3 = fig.add_subplot(4, 3, 12)
-    ax10 = fig.add_subplot(4, 3, 9)
-
-    ax4 = fig.add_subplot(4, 3, 1)
-    ax5 = fig.add_subplot(4, 3, 4)
-    ax6 = fig.add_subplot(4, 3, 10)
-    ax11 = fig.add_subplot(4, 3, 7)
-
-    ax7 = fig.add_subplot(4, 3, 2)
-    ax8 = fig.add_subplot(4, 3, 5)
-    ax9 = fig.add_subplot(4, 3, 11)
-    ax12 = fig.add_subplot(4, 3, 8)
-
-    #print(Dataset["differential_v-momentum_flux"][:,:])
-    #print(Dataset["differential_potential_temperature_flux"][:,:])
-
-    for ax in [ax1, ax2, ax3, ax4, ax5, ax6, ax7, ax8, ax9, ax10, ax11, ax12]:
-        ax.plot(local_time, z_s[:].data, color = "grey", linestyle = "dotted", linewidth = 0.5, label = "Surface Layer Height", zorder = 3)
-        ax.plot(local_time, z_i[:].data, color = "black", linestyle = "dashed", linewidth = 0.5, label = "Boundary Layer Height", zorder = 4)
-        for val in vertical_line:
-            if val != -1:
-                ax.plot(np.ones(z[:].data.shape) * data_time[val].data, z[:].data, color = "cyan", linewidth = 0.5, zorder = 5)
-
-    #ax3.plot(Dataset["time"][:].data, surface_potential_temperature, color = "lime")
-    #ax3.plot(Dataset["time"][:].data, Dataset["potential_temperature"][:,1].data, color = "orange")
-
-    u_bar_plot = ax1.pcolormesh(local_time, z[:].data, np.swapaxes(u_bar[:,:], 0, 1), shading='nearest', vmin = -np.nanmax([np.abs(np.nanmin(u_bar[:,:])), np.abs(np.nanmax(u_bar[:,:]))]), vmax = np.nanmax([np.abs(np.nanmin(u_bar[:,:])), np.abs(np.nanmax(u_bar[:,:]))]), cmap = "PuOr", zorder = 1)
-    v_bar_plot = ax2.pcolormesh(local_time, z[:].data, np.swapaxes(v_bar[:,:], 0, 1), shading='nearest', vmin = -np.nanmax([np.abs(np.nanmin(v_bar[:,:])), np.abs(np.nanmax(v_bar[:,:]))]), vmax = np.nanmax([np.abs(np.nanmin(v_bar[:,:])), np.abs(np.nanmax(v_bar[:,:]))]), cmap = "PuOr", zorder = 1)
-    theta_plot = ax3.pcolormesh(local_time, z[:].data, np.swapaxes(theta[:,:], 0, 1), shading='nearest', vmin = np.nanmin(theta[:,:]), vmax = np.nanmax(theta[:,:]), cmap = "Reds", zorder = 1)
-    r_v_plot = ax10.pcolormesh(local_time, z[:].data, np.swapaxes(r_v[:,:], 0, 1), shading='nearest', vmin = 0, vmax = np.nanmax([np.abs(np.nanmin(r_v[:,:])), np.abs(np.nanmax(r_v[:,:]))]), cmap = "YlGn", zorder = 1)
-
-    uw_plot = ax4.pcolormesh(local_time, z[:].data, np.swapaxes(uw[1:,:], 0, 1), shading="flat", vmin = -np.nanmax([np.abs(np.nanmin(uw[1:,:])), np.abs(np.nanmax(uw[1:,:]))]), vmax = np.nanmax([np.abs(np.nanmin(uw[1:,:])), np.abs(np.nanmax(uw[1:,:]))]), cmap = "PuOr", zorder = 1)
-    vw_plot = ax5.pcolormesh(local_time, z[:].data, np.swapaxes(vw[1::,:], 0, 1), shading="flat", vmin = -np.nanmax([np.abs(np.nanmin(vw[1:,:])), np.abs(np.nanmax(vw[1:,:]))]), vmax = np.nanmax([np.abs(np.nanmin(vw[1:,:])), np.abs(np.nanmax(vw[1:,:]))]), cmap = "PuOr", zorder = 1)
-    thetaw_plot = ax6.pcolormesh(local_time, z[:].data, np.swapaxes(thetaw[1:,:], 0, 1), shading="flat", vmin = -np.nanmax([np.abs(np.nanmin(thetaw[1:,:])), np.abs(np.nanmax(thetaw[1:,:]))]), vmax = np.nanmax([np.abs(np.nanmin(thetaw[1:,:])), np.abs(np.nanmax(thetaw[1:,:]))]), cmap = "bwr", zorder = 1)
-    r_vw_plot = ax11.pcolormesh(local_time, z[:].data, np.swapaxes(r_vw[1:,:], 0, 1), shading="flat", vmin = -np.nanmax([np.abs(np.nanmin(r_vw[1:,:])), np.abs(np.nanmax(r_vw[1:,:]))]), vmax = np.nanmax([np.abs(np.nanmin(r_vw[1:,:])), np.abs(np.nanmax(r_vw[1:,:]))]), cmap = "BrBG", zorder = 1)
-
-    puwpz_plot = ax7.pcolormesh(local_time, z[:].data, np.swapaxes(puwpz[:,::], 0, 1), shading='nearest', vmin = -np.nanmax([np.abs(np.nanmin(puwpz[:,:])), np.abs(np.nanmax(puwpz[:,:]))]), vmax = np.nanmax([np.abs(np.nanmin(puwpz[:,:])), np.abs(np.nanmax(puwpz[:,:]))]), cmap = "PuOr", zorder = 1)
-    pvwpz_plot = ax8.pcolormesh(local_time, z[:].data, np.swapaxes(pvwpz[:,:], 0, 1), shading='nearest', vmin = -np.nanmax([np.abs(np.nanmin(pvwpz[:,:])), np.abs(np.nanmax(pvwpz[:,:]))]), vmax = np.nanmax([np.abs(np.nanmin(pvwpz[:,:])), np.abs(np.nanmax(pvwpz[:,:]))]), cmap = "PuOr", zorder = 1)
-    pthetawpz_plot = ax9.pcolormesh(local_time, z[:].data, np.swapaxes(pthetawpz[:,:], 0, 1), shading='nearest', vmin = -np.nanmax([np.abs(np.nanmin(pthetawpz[:,:])), np.abs(np.nanmax(pthetawpz[:,:]))]), vmax = np.nanmax([np.abs(np.nanmin(pthetawpz[:,:])), np.abs(np.nanmax(pthetawpz[:,:]))]), cmap = "bwr", zorder = 1)
-    pr_vwpz_plot = ax12.pcolormesh(local_time, z[:].data, np.swapaxes(pr_vwpz[:,:], 0, 1), shading='nearest', vmin = -np.nanmax([np.abs(np.nanmin(pr_vwpz[:,:])), np.abs(np.nanmax(pr_vwpz[:,:]))]), vmax = np.nanmax([np.abs(np.nanmin(pr_vwpz[:,:])), np.abs(np.nanmax(pr_vwpz[:,:]))]), cmap = "BrBG", zorder = 1)
-
-    tick_ids = np.round(np.linspace(0, len(local_time) - 1, 8)).astype(int)
-    
-    ax1.set_xticks(local_time[tick_ids])
-    ax1.set_xticklabels([])
-    ax1.set_title("Output")
-    ax2.set_xticks(local_time[tick_ids])
-    ax2.set_xticklabels([])
-    ax3.set_xticks(local_time[tick_ids])
-    ax3.set_xticklabels(local_time[tick_ids], rotation = 80)
-    ax10.set_xticks(local_time[tick_ids])
-    ax10.set_xticklabels([])
-
-    ax4.set_xticks(local_time[tick_ids])
-    ax4.set_xticklabels([])
-    ax4.set_title("Fluxes")
-    ax4.set_ylabel("z")
-    ax5.set_xticks(local_time[tick_ids])
-    ax5.set_xticklabels([])
-    ax5.set_ylabel("z")
-    ax6.set_xticks(local_time[tick_ids])
-    ax6.set_xticklabels(local_time[tick_ids], rotation = 80)
-    ax6.set_ylabel("z")
-    ax11.set_xticks(local_time[tick_ids])
-    ax11.set_xticklabels([])
-    ax11.set_ylabel("z")
-
-    ax7.set_xticks(local_time[tick_ids])
-    ax7.set_xticklabels([])
-    ax7.set_title("Differential Fluxes")
-    ax8.set_xticks(local_time[tick_ids])
-    ax8.set_xticklabels([])
-    ax9.set_xticks(local_time[tick_ids])
-    ax9.set_xticklabels(local_time[tick_ids], rotation = 80)
-    ax12.set_xticks(local_time[tick_ids])
-    ax12.set_xticklabels([])
-
-    cbar1 = fig.colorbar(u_bar_plot, pad = 0.01)
-    cbar1.set_label(r"$\overline{u}$")
-    cbar2 = fig.colorbar(v_bar_plot, pad = 0.01)
-    cbar2.set_label(r"$\overline{v}$")
-    cbar3 = fig.colorbar(theta_plot, pad = 0.01)
-    cbar3.set_label(r"$\overline{\theta}$")
-    cbar10 = fig.colorbar(r_v_plot, pad = 0.01)
-    cbar10.set_label(r"$\overline{r_v}$")
-
-    cbar4 = fig.colorbar(uw_plot, pad = 0.01)
-    cbar4.set_label(r"$u'w'$")
-    cbar5 = fig.colorbar(vw_plot, pad = 0.01)
-    cbar5.set_label(r"$v'w'$")
-    cbar6 = fig.colorbar(thetaw_plot, pad = 0.01)
-    cbar6.set_label(r"$\theta' w'$")
-    cbar11 = fig.colorbar(r_vw_plot, pad = 0.01)
-    cbar11.set_label(r"$r_v' w'$")
-
-    cbar7 = fig.colorbar(puwpz_plot, pad = 0.01)
-    cbar7.set_label(r"$\frac{\partial \overline{u'w'}}{\partial z}$")
-    cbar8 = fig.colorbar(pvwpz_plot, pad = 0.01)
-    cbar8.set_label(r"$\frac{\partial \overline{v'w'}}{\partial z}$")
-    cbar9 = fig.colorbar(pthetawpz_plot, pad = 0.01)
-    cbar9.set_label(r"$\frac{\partial \overline{\theta' w'}}{\partial z}$")
-    cbar12 = fig.colorbar(pr_vwpz_plot, pad = 0.01)
-    cbar12.set_label(r"$\frac{\partial \overline{r_v' w'}}{\partial z}$")
-
-    fig.suptitle(f'PBL Model Output from {local_time[0]} to {local_time[-1]}')
-    fig.savefig(f"{os.path.dirname(os.path.realpath(__file__))}/{title}.png", dpi = 150, bbox_inches = "tight")
-    plt.close()
-    Dataset.close()
-
-def plot_radiation(filename : str, title : str = "Latest_Output_Radiation"):
-    Dataset = NCDF(filename, "r", format = "NETCDF4")
-
-    z = dynamics._ensure_unit_aware_arrays(Dataset["height"][:], "m")
-    theta = dynamics._ensure_unit_aware_arrays(Dataset["potential_temperature"][:,:], "K")
-    u_bar = dynamics._ensure_unit_aware_arrays(Dataset["u-component_of_mean_wind"][:,:], "m s^(-1)")
-    v_bar = dynamics._ensure_unit_aware_arrays(Dataset["v-component_of_mean_wind"][:,:], "m s^(-1)")
-    T = dynamics._ensure_unit_aware_arrays(Dataset["temperature"][:], "K")
-    z_s = dynamics._ensure_unit_aware_arrays(Dataset["surface_layer_height"][:], "m")
-    z_i = dynamics._ensure_unit_aware_arrays(Dataset["pbl_top_height"][:], "m")
-    p = dynamics._ensure_unit_aware_arrays(Dataset["pressure"][:,:], "Pa")
-    r_v = dynamics._ensure_unit_aware_arrays(Dataset["mixing_ratio"][:,:], "kg kg^(-1)")
-    SW = dynamics._ensure_unit_aware_arrays(Dataset["incoming_solar_radiation"][:], "W m^(-2)")
-    I = dynamics._ensure_unit_aware_arrays(Dataset["net_irradiance"][:,:], "W m^(-2)")
-    u_star = dynamics._ensure_unit_aware_arrays(Dataset["u_star"][:], "m s^(-1)")
-    theta_star = dynamics._ensure_unit_aware_arrays(Dataset["theta_star"][:], "K")
-    data_time = Dataset["time"]
-    data_tz = Dataset["timezone"][:]
-    z_0 = Quantity(0.1, "m")
-    lat = Quantity(33.16, "degree")
-    model_time = Dataset["model_time"]
-    rho = Quantity(1.2, "kg m^(3)")
-    # p[this_ind,1].to_base_units() / (physics.R_d * T_1)
-    # rho
-
-    local_time = np.array([num2date(x, data_time.units, only_use_cftime_datetimes=False).replace(tzinfo = timezone("UTC")).astimezone(timezone(data_tz)).strftime("%Y-%m-%d %H:%M:%S") for x in data_time[:].data])
-
-    T_1 = T[:,1]
-    H = - (p[:,1].to_base_units() / (physics.R_d * T_1)) * physics.c_p * u_star[:] * theta_star[:]
-    #print((p[:,1].to_base_units() / (physics.R_d * T_1[:])), u_star[:], theta_star[:])
-    SW_in = SW[:]
-
-    fig = plt.figure(2, figsize = (12, 8))
-    ax = fig.add_subplot(111)
-    ax2 = ax.twinx()
-    ax.plot(model_time[1:]/3600, -H[1:], color = "green", label = r"$H$")
-    ax.plot(model_time[1:]/3600, SW_in[1:], color = "yellow", label = r"$F^\downarrow_{SW}$")
-    ax.plot(model_time[1:]/3600, I[1:,0], color = "orange", label = r"$I^{net}_{LW}$")
-    ax.plot(model_time[1:]/3600, -H[1:] + I[1:,0] + SW_in[1:], color = "black", label = "Sum")
-    ax.set_ylabel(r"Surface Energy Contribution ($\frac{W}{m^{2}}$)")
-    ax.set_xlabel("Hours Since Model Initialization")
-
-    ax2.plot(model_time[1:]/3600, T[1:,1], color = "cyan", label = r"$T_1$", linestyle = "dashed")
-    ax2.plot(model_time[1:]/3600, T[1:,0], color = "blue", label = r"$T_g$", linestyle = "dashed")
-    ax2.set_ylabel(r"Temperature ($K$)")
-
-    fig.legend()
-    fig.suptitle(f'PBL Model SFC Energy Budget from {local_time[0]} to {local_time[-1]}')
-    fig.savefig(f"{os.path.dirname(os.path.realpath(__file__))}/{title}.png", dpi = 150, bbox_inches = "tight")
-    plt.close()
-    Dataset.close()
 
 def progress(total_time : float, timestep : float, current_step : int) -> None:
     sys.stdout.write("\r")
 
-    num_steps = np.ceil(total_time.to("s").m / timestep.to("s").m)
+    num_steps = np.ceil(total_time / timestep)
     fraction = current_step / num_steps
 
 
@@ -315,103 +67,160 @@ def run_model(config : dict, prepared_filename : str, **kwargs) -> str:
     soil_heat_capacity = config["soil_heat_capacity"]
     soil_depth = config["soil_depth"]
     
-    ozone_layer_depth = config["ozone_layer_depth"].to_base_units()
+    ozone_layer_depth = config["ozone_layer_depth"]
     ozone_layer_average_ozone = config["ozone_layer_average_ozone"]
     ozone_layer_average_water_vapor = config["ozone_layer_average_water_vapor"]
     ozone_layer_temp = config["ozone_layer_temp"]
 
     nu_min = config["wavenumber_minimum"]
     nu_max = config["wavenumber_maximum"]
-    nu = Quantity(np.arange(nu_min.m, nu_max.m, 10), "cm^(-1)").to_base_units()
+    nu = np.arange(nu_min, nu_max, 1000)
 
     Dataset = NCDF(output_filename, "r+", format = "NETCDF4")
 
-    z = Dataset["height"]
-    dz = Dataset["height_change"]
-    depth = Dataset["layer_depth"]
-    p = Dataset["pressure"]
-    dpdt = Dataset["dpdt"]
-    T = Dataset["temperature"]
-    rho = Dataset["density"]
-    theta = Dataset["potential_temperature"]
-    r_v = Dataset["mixing_ratio"]
-    e = Dataset["vapor_pressure"]
-    dr_vdt = Dataset["dr_vdt"]
-    u_ag = Dataset["u-component_of_ageostrophic_wind"]
-    v_ag = Dataset["v-component_of_ageostrophic_wind"]
-    u_g = Dataset["u-component_of_geostrophic_wind"]
-    v_g = Dataset["v-component_of_geostrophic_wind"]
-    u_bar = Dataset["u-component_of_mean_wind"]
-    v_bar = Dataset["v-component_of_mean_wind"]
-    duagdt = Dataset["duagdt"]
-    dvagdt = Dataset["dvagdt"]
-    dugdt = Dataset["dugdt"]
-    dvgdt = Dataset["dvgdt"]
-    dudt = Dataset["dudt"]
-    dvdt = Dataset["dvdt"]
-    dthetadt = Dataset["dthetadt"]
-    dTdt = Dataset["dTdt"]
-    z_s = Dataset["surface_layer_height"]
-    z_i = Dataset["pbl_top_height"]
-    dz_idt = Dataset["dz_idt"]
-    uw = Dataset["u-momentum_flux"]
-    vw = Dataset["v-momentum_flux"]
-    thetaw = Dataset["potential_temperature_flux"]
-    r_vw = Dataset["moisture_flux"]
-    K_m = Dataset["eddy_momentum_diffusivity"]
-    K_h = Dataset["eddy_heat_diffusivity"]
-    puwpz = Dataset["differential_u-momentum_flux"]
-    pvwpz = Dataset["differential_v-momentum_flux"]
-    pthetawpz = Dataset["differential_potential_temperature_flux"]
-    pr_vwpz = Dataset["differential_moisture_flux"]
-    time = Dataset["time"]
-    model_time = Dataset["model_time"]
-    shortwave_reduction = Dataset["shortwave_reduction"]
-    SW_in = Dataset["incoming_solar_radiation"]
-    I = Dataset["net_irradiance"]
-    u_star = Dataset["u_star"]
-    theta_star = Dataset["theta_star"]
-    r_v_star = Dataset["r_v_star"]
     data_tz = Dataset["timezone"][0]
-    L = Dataset["monin_obukhov_length_scale"]
+    current_time_index = np.count_nonzero(~np.isnan(Dataset["potential_temperature"][:,1])) - 1
+    current_model_state_time_utc = num2date(Dataset["time"][0], Dataset["time"].units, only_use_cftime_datetimes=False).replace(tzinfo = timezone("UTC")) + fudge_time
+    current_model_state_time_local = current_model_state_time_utc.astimezone(timezone(data_tz))
+    timestep = np.float64(config["time_step"])
+    total_time = np.float64(config["total_time"])
+    time_units = Dataset["time"].units
+
+    max_timesteps, ts_remainder = divmod(total_time, timestep)
+    if ts_remainder > 0:
+        max_timesteps += 1
+    max_timesteps = int(max_timesteps + 1)
+
+    z = Dataset["height"][:] #
+    dz = Dataset["height_change"][:] #
+    depth = Dataset["layer_depth"][:] #
+
+    p = np.full((max_timesteps, Dataset["pressure"].shape[1]), np.nan, dtype = np.float64)
+    p[0,:] = Dataset["pressure"][0,:]
+    dpdt = np.full((max_timesteps, Dataset["dpdt"].shape[1]), np.nan, dtype = np.float64)
+    dpdt[0,:] = Dataset["dpdt"][0,:]
+    T = np.full((max_timesteps, Dataset["temperature"].shape[1]), np.nan, dtype = np.float64)
+    T[0,:] = Dataset["temperature"][0,:]
+    rho = np.full((max_timesteps, Dataset["density"].shape[1]), np.nan, dtype = np.float64)
+    rho[0,:] = Dataset["density"][0,:]
+    theta = np.full((max_timesteps, Dataset["potential_temperature"].shape[1]), np.nan, dtype = np.float64)
+    theta[0,:] = Dataset["potential_temperature"][0,:]
+    r_v = np.full((max_timesteps, Dataset["mixing_ratio"].shape[1]), np.nan, dtype = np.float64)
+    r_v[0,:] = Dataset["mixing_ratio"][0,:]
+    e = np.full((max_timesteps, Dataset["vapor_pressure"].shape[1]), np.nan, dtype = np.float64)
+    e[0,:] = Dataset["vapor_pressure"][0,:]
+    dr_vdt = np.full((max_timesteps, Dataset["dr_vdt"].shape[1]), np.nan, dtype = np.float64)
+    dr_vdt[0,:] = Dataset["dr_vdt"][0,:]
+    u_ag = np.full((max_timesteps, Dataset["u-component_of_ageostrophic_wind"].shape[1]), np.nan, dtype = np.float64)
+    u_ag[0,:] = Dataset["u-component_of_ageostrophic_wind"][0,:]
+    v_ag = np.full((max_timesteps, Dataset["v-component_of_ageostrophic_wind"].shape[1]), np.nan, dtype = np.float64)
+    v_ag[0,:] = Dataset["v-component_of_ageostrophic_wind"][0,:]
+    u_g = np.full((max_timesteps, Dataset["u-component_of_geostrophic_wind"].shape[1]), np.nan, dtype = np.float64)
+    u_g[0,:] = Dataset["u-component_of_geostrophic_wind"][0,:]
+    v_g = np.full((max_timesteps, Dataset["v-component_of_geostrophic_wind"].shape[1]), np.nan, dtype = np.float64)
+    v_g[0,:] = Dataset["v-component_of_geostrophic_wind"][0,:]
+    u_bar = np.full((max_timesteps, Dataset["u-component_of_mean_wind"].shape[1]), np.nan, dtype = np.float64)
+    u_bar[0,:] = Dataset["u-component_of_mean_wind"][0,:]
+    v_bar = np.full((max_timesteps, Dataset["v-component_of_mean_wind"].shape[1]), np.nan, dtype = np.float64)
+    v_bar[0,:] = Dataset["v-component_of_mean_wind"][0,:]
+    duagdt = np.full((max_timesteps, Dataset["duagdt"].shape[1]), np.nan, dtype = np.float64)
+    duagdt[0,:] = Dataset["duagdt"][0,:]
+    dvagdt = np.full((max_timesteps, Dataset["dvagdt"].shape[1]), np.nan, dtype = np.float64)
+    dvagdt[0,:] = Dataset["dvagdt"][0,:]
+    dugdt = np.full((max_timesteps, Dataset["dugdt"].shape[1]), np.nan, dtype = np.float64)
+    dugdt[0,:] = Dataset["dugdt"][0,:]
+    dvgdt = np.full((max_timesteps, Dataset["dvgdt"].shape[1]), np.nan, dtype = np.float64)
+    dvgdt[0,:] = Dataset["dvgdt"][0,:]
+    dudt = np.full((max_timesteps, Dataset["dudt"].shape[1]), np.nan, dtype = np.float64)
+    dudt[0,:] = Dataset["dudt"][0,:]
+    dvdt = np.full((max_timesteps, Dataset["dvdt"].shape[1]), np.nan, dtype = np.float64)
+    dvdt[0,:] = Dataset["dvdt"][0,:]
+    dthetadt = np.full((max_timesteps, Dataset["dthetadt"].shape[1]), np.nan, dtype = np.float64)
+    dthetadt[0,:] = Dataset["dthetadt"][0,:]
+    dTdt = np.full((max_timesteps, Dataset["dTdt"].shape[1]), np.nan, dtype = np.float64)
+    dTdt[0,:] = Dataset["dTdt"][0,:]
+    z_s = np.full((max_timesteps), np.nan, dtype = np.float64)
+    z_s[0] = Dataset["surface_layer_height"][0]
+    z_i = np.full((max_timesteps), np.nan, dtype = np.float64)
+    z_i[0] = Dataset["pbl_top_height"][0]
+    dz_idt = np.full((max_timesteps), np.nan, dtype = np.float64)
+    dz_idt[0] = Dataset["dz_idt"][0]
+    uw = np.full((max_timesteps, Dataset["u-momentum_flux"].shape[1]), np.nan, dtype = np.float64)
+    uw[0,:] = Dataset["u-momentum_flux"][0,:]
+    vw = np.full((max_timesteps, Dataset["v-momentum_flux"].shape[1]), np.nan, dtype = np.float64)
+    vw[0,:] = Dataset["v-momentum_flux"][0,:]
+    thetaw = np.full((max_timesteps, Dataset["potential_temperature_flux"].shape[1]), np.nan, dtype = np.float64)
+    thetaw[0,:] = Dataset["potential_temperature_flux"][0,:]
+    r_vw = np.full((max_timesteps, Dataset["moisture_flux"].shape[1]), np.nan, dtype = np.float64)
+    r_vw[0,:] = Dataset["moisture_flux"][0,:]
+    K_m = np.full((max_timesteps, Dataset["eddy_momentum_diffusivity"].shape[1]), np.nan, dtype = np.float64)
+    K_m[0,:] = Dataset["eddy_momentum_diffusivity"][0,:]
+    K_h = np.full((max_timesteps, Dataset["eddy_heat_diffusivity"].shape[1]), np.nan, dtype = np.float64)
+    K_h[0,:] = Dataset["eddy_heat_diffusivity"][0,:]
+    puwpz = np.full((max_timesteps, Dataset["differential_u-momentum_flux"].shape[1]), np.nan, dtype = np.float64)
+    puwpz[0,:] = Dataset["differential_u-momentum_flux"][0,:]
+    pvwpz = np.full((max_timesteps, Dataset["differential_v-momentum_flux"].shape[1]), np.nan, dtype = np.float64)
+    pvwpz[0,:] = Dataset["differential_v-momentum_flux"][0,:]
+    pthetawpz = np.full((max_timesteps, Dataset["differential_potential_temperature_flux"].shape[1]), np.nan, dtype = np.float64)
+    pthetawpz[0,:] = Dataset["differential_potential_temperature_flux"][0,:]
+    pr_vwpz = np.full((max_timesteps, Dataset["differential_moisture_flux"].shape[1]), np.nan, dtype = np.float64)
+    pr_vwpz[0,:] = Dataset["differential_moisture_flux"][0,:]
+    time = np.full((max_timesteps), np.nan, dtype = np.float64)
+    time[0] = Dataset["time"][0]
+    model_time = np.full((max_timesteps), np.nan, dtype = np.float64)
+    model_time[0] = Dataset["model_time"][0]
+    shortwave_reduction = np.full((max_timesteps), np.nan, dtype = np.float64)
+    shortwave_reduction[0] = Dataset["shortwave_reduction"][0]
+    SW_in = np.full((max_timesteps), np.nan, dtype = np.float64)
+    SW_in[0] = Dataset["incoming_solar_radiation"][0]
+    I = np.full((max_timesteps, Dataset["net_irradiance"].shape[1]), np.nan, dtype = np.float64)
+    I[0,:] = Dataset["net_irradiance"][0,:]
+    u_star = np.full((max_timesteps), np.nan, dtype = np.float64)
+    u_star[0] = Dataset["u_star"][0]
+    theta_star = np.full((max_timesteps), np.nan, dtype = np.float64)
+    theta_star[0] = Dataset["theta_star"][0]
+    r_v_star = np.full((max_timesteps), np.nan, dtype = np.float64)
+    r_v_star[0] = Dataset["r_v_star"][0]
+    L = np.full((max_timesteps), np.nan, dtype = np.float64)
+    L[0] = Dataset["monin_obukhov_length_scale"][0]
+
+    solar_exitance = radiation.spectral_exitance(np.array([5773], ndmin=0), nu[:])
 
     if "lat" in Dataset.variables.keys():
-        lat = Dataset["lat"]
+        lat = Dataset["latitude"][0]
     else:
         lat = config["default_lat"]
     
     if "lon" in Dataset.variables.keys():
-        lon = Dataset["lon"]
+        lon = Dataset["longitude"][0]
     else:
         lon = config["default_lon"]
 
-    elapsed_time = Quantity(0, "s")
-    current_time_index = np.count_nonzero(~np.isnan(theta[:,1])) - 1
-    current_model_state_time_utc = num2date(time[current_time_index], time.units, only_use_cftime_datetimes=False).replace(tzinfo = timezone("UTC")) + fudge_time
-    current_model_state_time_local = current_model_state_time_utc.astimezone(timezone(data_tz))
-    timestep = config["time_step"]
-    total_time = config["total_time"]
+    elapsed_time = 0
+    
     z_0 = config["roughness_length"]
 
     if radiation_schema:
-        air_absorbtion_coefficients, _ = dynamics.get_absorbtion_coefficient(nu_min, nu_max, ["CO2", "H2O", "O2", "N2", "O3"])
+        air_absorbtion_coefficients, _ = radiation.get_absorbtion_coefficient(nu_min, nu_max, ["CO2", "H2O", "O2", "N2", "O3"])
         air_absorbtion_coefficients = [x[::1000] for x in air_absorbtion_coefficients]
 
     init_duration = (datetime.now(timezone('UTC'))-init_time)
     if progress_tracker:
         print(f"Model successfully initialized after {init_duration.seconds:4.1f} seconds")
-        progress(total_time, timestep.to("s"), current_time_index)
+        progress(total_time, timestep, current_time_index)
     runtime = datetime.now(timezone("UTC"))
 
+    Dataset.close()
+
     # Primary Model Loop
-    while elapsed_time < total_time:
+    for current_time_index in range(0, max_timesteps - 2):
         # Current timestep details
-        elapsed_time += timestep.to("s")
-        current_model_state_time_utc += timedelta(seconds = timestep.to("s").m)
+        elapsed_time += timestep
+        current_model_state_time_utc += timedelta(seconds = timestep)
         current_model_state_time_local = current_model_state_time_utc.astimezone(timezone(data_tz))
         current_time_index += 1
-        model_time[current_time_index] = model_time[current_time_index-1] + timestep.to("s")
-        time[current_time_index] = date2num(current_model_state_time_utc, time.units)
+        model_time[current_time_index] = model_time[current_time_index-1] + timestep
+        time[current_time_index] = date2num(current_model_state_time_utc, time_units)
 
         # Model layer-based filters
         model_bottom = (z == z[0])
@@ -422,16 +231,16 @@ def run_model(config : dict, prepared_filename : str, **kwargs) -> str:
         model_top = (z == z[-1])
 
         # Initializing time-rate-of-change variables for the current time
-        dpdt[current_time_index,:] = Quantity(0, "Pa s^(-1)")
-        duagdt[current_time_index,:] = Quantity(0, "m s^(-2)")
-        dvagdt[current_time_index,:] = Quantity(0, "m s^(-2)")
-        dugdt[current_time_index,:] = Quantity(0, "m s^(-2)")
-        dvgdt[current_time_index,:] = Quantity(0, "m s^(-2)")
-        dudt[current_time_index,:] = Quantity(0, "m s^(-2)")
-        dvdt[current_time_index,:] = Quantity(0, "m s^(-2)")
-        dthetadt[current_time_index,:] = Quantity(0, "K s^(-1)")
-        dTdt[current_time_index,:] = Quantity(0, "K s^(-1)")
-        dr_vdt[current_time_index,:] = Quantity(0, "kg kg^(-1) s^(-1)")
+        dpdt[current_time_index,:] = 0 #"Pa s^(-1)"
+        duagdt[current_time_index,:] = 0 #"m s^(-2)"
+        dvagdt[current_time_index,:] = 0 #"m s^(-2)"
+        dugdt[current_time_index,:] = 0 #"m s^(-2)"
+        dvgdt[current_time_index,:] = 0 #"m s^(-2)"
+        dudt[current_time_index,:] = 0 #"m s^(-2)"
+        dvdt[current_time_index,:] = 0 #"m s^(-2)"
+        dthetadt[current_time_index,:] = 0 #"K s^(-1)"
+        dTdt[current_time_index,:] = 0 #"K s^(-1)"
+        dr_vdt[current_time_index,:] = 0 #"kg kg^(-1) s^(-1)"
 
         if dynamics_schema != 0:
             if dynamics_schema == 1:
@@ -440,8 +249,8 @@ def run_model(config : dict, prepared_filename : str, **kwargs) -> str:
                 #dpdt[current_time_index,model_bottom] += Quantity(0, "Pa s^(-1)") # Pressure change isn't actually supported here and now; this is an example.
 
                 # Winds
-                duagdt[current_time_index,model_bottom] = duagdt[current_time_index,model_bottom] - (Quantity(u_ag[current_time_index-1,model_bottom], u_ag.units)/timestep.to("s")) # Momentum AT the ground should be zero, so simply get rid of it. dynamics.Coriolis_u(lat, v_bar[current_time_index-1,j], v_g[current_time_index-1,j]) - Quantity((puwpz[current_time_index,j]), puwpz.units) #
-                dvagdt[current_time_index,model_bottom] = dvagdt[current_time_index,model_bottom] - (Quantity(v_ag[current_time_index-1,model_bottom], v_ag.units)/timestep.to("s")) # dynamics.Coriolis_v(lat, u_bar[current_time_index-1,j], u_g[current_time_index-1,j]) - Quantity((pvwpz[current_time_index,j]), pvwpz.units) #
+                duagdt[current_time_index,model_bottom] = duagdt[current_time_index,model_bottom] - (u_ag[current_time_index-1,model_bottom]/timestep) # Momentum AT the ground should be zero, so simply get rid of it. dynamics.Coriolis_u(lat, v_bar[current_time_index-1,j], v_g[current_time_index-1,j]) - Quantity((puwpz[current_time_index,j]), puwpz.units) #
+                dvagdt[current_time_index,model_bottom] = dvagdt[current_time_index,model_bottom] - (v_ag[current_time_index-1,model_bottom]/timestep) # dynamics.Coriolis_v(lat, u_bar[current_time_index-1,j], u_g[current_time_index-1,j]) - Quantity((pvwpz[current_time_index,j]), pvwpz.units) #
                 duagdt[current_time_index,surface_layer] = duagdt[current_time_index,surface_layer] + dynamics.Coriolis_u(lat, v_ag[current_time_index-1,surface_layer])
                 dvagdt[current_time_index,surface_layer] = dvagdt[current_time_index,surface_layer] + dynamics.Coriolis_v(lat, u_ag[current_time_index-1,surface_layer])
                 duagdt[current_time_index,boundary_layer] = duagdt[current_time_index,boundary_layer] + dynamics.Coriolis_u(lat, v_ag[current_time_index-1,boundary_layer])
@@ -450,29 +259,35 @@ def run_model(config : dict, prepared_filename : str, **kwargs) -> str:
                 dvagdt[current_time_index,free_atmosphere] = dvagdt[current_time_index,free_atmosphere] + dynamics.Coriolis_v(lat, u_ag[current_time_index-1,free_atmosphere])
                 duagdt[current_time_index,model_top] = duagdt[current_time_index,model_top] + dynamics.Coriolis_u(lat, v_ag[current_time_index-1,model_top])
                 dvagdt[current_time_index,model_top] = dvagdt[current_time_index,model_top] + dynamics.Coriolis_v(lat, u_ag[current_time_index-1,model_top])
+        
+        if (turbulence_schema != 0) or (radiation_schema != 0):
+            theta_z_s = np.interp(z_s[current_time_index-1], z[:], theta[current_time_index-1,:])
+            u_z_s = np.interp(z_s[current_time_index-1], z[:], u_bar[current_time_index-1,:])
+            v_z_s = np.interp(z_s[current_time_index-1], z[:], v_bar[current_time_index-1,:])
+            r_v_s = np.interp(z_s[current_time_index-1], z[:], r_v[current_time_index-1,:])
+            u_star[current_time_index], theta_star[current_time_index], r_v_star[current_time_index] = turbulence.stars_alt(theta_z_s, theta[current_time_index-1,0], r_v_s, r_v[current_time_index-1,0], z_s[current_time_index-1], z_0, u_z_s, v_z_s)
 
 
         if turbulence_schema != 0:
             # Calculate surface layer-based stars
-            theta_z_s = Quantity(interpolate.interp1d(z[:].data, theta[current_time_index-1,:].data)(z_s[current_time_index-1].data), "K")
-            u_z_s = Quantity(interpolate.interp1d(z[:].data, u_bar[current_time_index-1,:].data)(z_s[current_time_index-1].data), "m s^(-1)")
-            v_z_s = Quantity(interpolate.interp1d(z[:].data, v_bar[current_time_index-1,:].data)(z_s[current_time_index-1].data), "m s^(-1)")
-            r_v_s = Quantity(interpolate.interp1d(z[:].data, r_v[current_time_index-1,:].data)(z_s[current_time_index-1].data), "kg kg^(-1)")
-            u_star[current_time_index], theta_star[current_time_index], r_v_star[current_time_index] = dynamics.stars_alt(theta_z_s, theta[current_time_index-1,0], r_v_s, r_v[current_time_index-1,0], z_s[current_time_index-1], z_0, u_z_s, v_z_s)
-            L[current_time_index] = dynamics.Monin_Obukhov_L((theta_z_s + Quantity(theta[current_time_index-1,0], "K"))/2, u_star[current_time_index], theta_star[current_time_index])
+            #theta_z_s = interpolate.interp1d(z[:], theta[current_time_index-1,:])(z_s[current_time_index-1])
+            #u_z_s = interpolate.interp1d(z[:], u_bar[current_time_index-1,:])(z_s[current_time_index-1])
+            #v_z_s = interpolate.interp1d(z[:], v_bar[current_time_index-1,:])(z_s[current_time_index-1])
+            #r_v_s = interpolate.interp1d(z[:], r_v[current_time_index-1,:])(z_s[current_time_index-1])
+            L[current_time_index] = turbulence.Monin_Obukhov_L((theta_z_s + theta[current_time_index-1,0])/2, u_star[current_time_index], theta_star[current_time_index])
 
             if turbulence_schema == 1:
                 # Calculate turbulent fluxes for the current time step
                 # Within the surface layer
-                uw[current_time_index,surface_layer[1:]], vw[current_time_index,surface_layer[1:]], thetaw[current_time_index,surface_layer[1:]], r_vw[current_time_index,surface_layer[1:]] = dynamics.fluxes_surface_layer_alt(u_star[current_time_index], theta_star[current_time_index], r_v_star[current_time_index], u_z_s, v_z_s)
+                uw[current_time_index,surface_layer[1:]], vw[current_time_index,surface_layer[1:]], thetaw[current_time_index,surface_layer[1:]], r_vw[current_time_index,surface_layer[1:]] = turbulence.fluxes_surface_layer_alt(u_star[current_time_index], theta_star[current_time_index], r_v_star[current_time_index], u_z_s, v_z_s)
                 
                 # Within the boundary layer
-                K_m[current_time_index,boundary_layer[1:]] = dynamics.eddy_momentum_diffusivity(theta[current_time_index-1,:], theta[current_time_index-1,0], z[:], z_s[current_time_index-1], z_i[current_time_index-1], u_bar[current_time_index-1,:], v_bar[current_time_index-1,:], z_0, L[current_time_index], u_star[current_time_index], boundary_layer)
-                K_h[current_time_index,boundary_layer[1:]] = dynamics.eddy_heat_diffusivity(theta[current_time_index-1,:], theta[current_time_index-1,0], z[:], z_s[current_time_index-1], z_i[current_time_index-1], u_bar[current_time_index-1,:], v_bar[current_time_index-1,:], z_0, L[current_time_index], u_star[current_time_index], boundary_layer)
-                uw[current_time_index,boundary_layer[1:]] = - K_m[current_time_index,boundary_layer[1:]] * (Quantity(u_bar[current_time_index-1,1:][boundary_layer[1:]] - u_bar[current_time_index-1,:-1][boundary_layer[1:]], "m s^(-1)")/Quantity(z[1:][boundary_layer[1:]] - z[:-1][boundary_layer[1:]], "m"))
-                vw[current_time_index,boundary_layer[1:]] = - K_m[current_time_index,boundary_layer[1:]] * (Quantity(v_bar[current_time_index-1,1:][boundary_layer[1:]] - v_bar[current_time_index-1,:-1][boundary_layer[1:]], "m s^(-1)")/Quantity(z[1:][boundary_layer[1:]] - z[:-1][boundary_layer[1:]], "m"))
-                thetaw[current_time_index,boundary_layer[1:]] = - K_h[current_time_index,boundary_layer[1:]] * (Quantity(theta[current_time_index-1,1:][boundary_layer[1:]] - theta[current_time_index-1,:-1][boundary_layer[1:]], "K")/Quantity(z[1:][boundary_layer[1:]] - z[:-1][boundary_layer[1:]], "m"))
-                r_vw[current_time_index,boundary_layer[1:]] = - K_h[current_time_index,boundary_layer[1:]] * (Quantity(r_v[current_time_index-1,1:][boundary_layer[1:]] - r_v[current_time_index-1,:-1][boundary_layer[1:]], "kg kg^(-1)")/Quantity(z[1:][boundary_layer[1:]] - z[:-1][boundary_layer[1:]], "m"))
+                K_m[current_time_index,boundary_layer[1:]] = turbulence.eddy_momentum_diffusivity(theta[current_time_index-1,:], theta[current_time_index-1,0], z[:], z_s[current_time_index-1], z_i[current_time_index-1], u_bar[current_time_index-1,:], v_bar[current_time_index-1,:], z_0, L[current_time_index], u_star[current_time_index], boundary_layer)
+                K_h[current_time_index,boundary_layer[1:]] = turbulence.eddy_heat_diffusivity(theta[current_time_index-1,:], theta[current_time_index-1,0], z[:], z_s[current_time_index-1], z_i[current_time_index-1], u_bar[current_time_index-1,:], v_bar[current_time_index-1,:], z_0, L[current_time_index], u_star[current_time_index], boundary_layer)
+                uw[current_time_index,boundary_layer[1:]] = - K_m[current_time_index,boundary_layer[1:]] * (u_bar[current_time_index-1,1:][boundary_layer[1:]] - u_bar[current_time_index-1,:-1][boundary_layer[1:]])/(z[1:][boundary_layer[1:]] - z[:-1][boundary_layer[1:]])
+                vw[current_time_index,boundary_layer[1:]] = - K_m[current_time_index,boundary_layer[1:]] * (v_bar[current_time_index-1,1:][boundary_layer[1:]] - v_bar[current_time_index-1,:-1][boundary_layer[1:]])/(z[1:][boundary_layer[1:]] - z[:-1][boundary_layer[1:]])
+                thetaw[current_time_index,boundary_layer[1:]] = - K_h[current_time_index,boundary_layer[1:]] * (theta[current_time_index-1,1:][boundary_layer[1:]] - theta[current_time_index-1,:-1][boundary_layer[1:]])/(z[1:][boundary_layer[1:]] - z[:-1][boundary_layer[1:]])
+                r_vw[current_time_index,boundary_layer[1:]] = - K_h[current_time_index,boundary_layer[1:]] * (r_v[current_time_index-1,1:][boundary_layer[1:]] - r_v[current_time_index-1,:-1][boundary_layer[1:]])/(z[1:][boundary_layer[1:]] - z[:-1][boundary_layer[1:]])
                 
                 # Within the free atmosphere
                 uw[current_time_index,free_atmosphere[1:]] = 0
@@ -488,95 +303,95 @@ def run_model(config : dict, prepared_filename : str, **kwargs) -> str:
 
                 # Calculate differential fluxes
                 # At the ground
-                puwpz[current_time_index,model_bottom] = Quantity(0, uw.units) / Quantity(dz[model_bottom[:-1]], dz.units)
-                pvwpz[current_time_index,model_bottom] = Quantity(0, vw.units) / Quantity(dz[model_bottom[:-1]], dz.units)
-                pthetawpz[current_time_index,model_bottom] = Quantity(0, thetaw.units) / Quantity(dz[model_bottom[:-1]], dz.units)
-                pr_vwpz[current_time_index,model_bottom] = Quantity(0, r_vw.units) / Quantity(dz[model_bottom[:-1]], dz.units)
+                puwpz[current_time_index,model_bottom] = 0 / dz[model_bottom[:-1]]
+                pvwpz[current_time_index,model_bottom] = 0 / dz[model_bottom[:-1]]
+                pthetawpz[current_time_index,model_bottom] = 0 / dz[model_bottom[:-1]]
+                pr_vwpz[current_time_index,model_bottom] = 0 / dz[model_bottom[:-1]]
                 
                 # At the model top
-                puwpz[current_time_index,model_top] = Quantity(- uw[current_time_index,model_top[1:]], uw.units) / Quantity(dz[model_top[1:]]/2, dz.units) #Quantity(0, uw.units) / Quantity(dz[model_top[1:]], dz.units)
-                pvwpz[current_time_index,model_top] = Quantity(- vw[current_time_index,model_top[1:]], vw.units) / Quantity(dz[model_top[1:]]/2, dz.units) #Quantity(0, vw.units) / Quantity(dz[model_top[1:]], dz.units)
-                pthetawpz[current_time_index,model_top] = Quantity(- thetaw[current_time_index,model_top[1:]], thetaw.units) / Quantity(dz[model_top[1:]]/2, dz.units) #Quantity(0, thetaw.units) / Quantity(dz[model_top[1:]], dz.units)
-                pr_vwpz[current_time_index,model_top] = Quantity(- r_vw[current_time_index,model_top[1:]], r_vw.units) / Quantity(dz[model_top[1:]]/2, dz.units)
+                puwpz[current_time_index,model_top] = - uw[current_time_index,model_top[1:]] / (dz[model_top[1:]]/2)
+                pvwpz[current_time_index,model_top] = - vw[current_time_index,model_top[1:]] / (dz[model_top[1:]]/2)
+                pthetawpz[current_time_index,model_top] = - thetaw[current_time_index,model_top[1:]] / (dz[model_top[1:]]/2)
+                pr_vwpz[current_time_index,model_top] = - r_vw[current_time_index,model_top[1:]] / (dz[model_top[1:]]/2)
                 
                 # Everywhere else
-                puwpz[current_time_index,1:-1] = Quantity(uw[current_time_index,1:] - uw[current_time_index,:-1], uw.units) / Quantity(dz[1:], dz.units)
-                pvwpz[current_time_index,1:-1] = Quantity(vw[current_time_index,1:] - vw[current_time_index,:-1], vw.units) / Quantity(dz[1:], dz.units)
-                pthetawpz[current_time_index,1:-1] = Quantity(thetaw[current_time_index,1:] - thetaw[current_time_index,:-1], thetaw.units) / Quantity(dz[1:], dz.units)
-                pr_vwpz[current_time_index,1:-1] = Quantity(r_vw[current_time_index,1:] - r_vw[current_time_index,:-1], r_vw.units) / Quantity(dz[1:], dz.units)
+                puwpz[current_time_index,1:-1] = (uw[current_time_index,1:] - uw[current_time_index,:-1]) / dz[1:]
+                pvwpz[current_time_index,1:-1] = (vw[current_time_index,1:] - vw[current_time_index,:-1]) / dz[1:]
+                pthetawpz[current_time_index,1:-1] = (thetaw[current_time_index,1:] - thetaw[current_time_index,:-1]) / dz[1:]
+                pr_vwpz[current_time_index,1:-1] = (r_vw[current_time_index,1:] - r_vw[current_time_index,:-1]) / dz[1:]
 
                 # Rates of change
                 # Winds
-                duagdt[current_time_index,surface_layer] = duagdt[current_time_index,surface_layer] - Quantity((puwpz[current_time_index,surface_layer]), puwpz.units)
-                dvagdt[current_time_index,surface_layer] = dvagdt[current_time_index,surface_layer] - Quantity((pvwpz[current_time_index,surface_layer]), pvwpz.units)
-                duagdt[current_time_index,boundary_layer] = duagdt[current_time_index,boundary_layer] - Quantity((puwpz[current_time_index,boundary_layer]), puwpz.units)
-                dvagdt[current_time_index,boundary_layer] = dvagdt[current_time_index,boundary_layer] - Quantity((pvwpz[current_time_index,boundary_layer]), pvwpz.units)
-                duagdt[current_time_index,free_atmosphere] = duagdt[current_time_index,free_atmosphere] - Quantity((puwpz[current_time_index,free_atmosphere]), puwpz.units)
-                dvagdt[current_time_index,free_atmosphere] = dvagdt[current_time_index,free_atmosphere] - Quantity((pvwpz[current_time_index,free_atmosphere]), pvwpz.units)
-                duagdt[current_time_index,model_top] = duagdt[current_time_index,model_top] - Quantity(puwpz[current_time_index,model_top], puwpz.units)
-                dvagdt[current_time_index,model_top] = dvagdt[current_time_index,model_top] - Quantity(pvwpz[current_time_index,model_top], pvwpz.units)
+                duagdt[current_time_index,surface_layer] = duagdt[current_time_index,surface_layer] - puwpz[current_time_index,surface_layer]
+                dvagdt[current_time_index,surface_layer] = dvagdt[current_time_index,surface_layer] - pvwpz[current_time_index,surface_layer]
+                duagdt[current_time_index,boundary_layer] = duagdt[current_time_index,boundary_layer] - puwpz[current_time_index,boundary_layer]
+                dvagdt[current_time_index,boundary_layer] = dvagdt[current_time_index,boundary_layer] - pvwpz[current_time_index,boundary_layer]
+                duagdt[current_time_index,free_atmosphere] = duagdt[current_time_index,free_atmosphere] - puwpz[current_time_index,free_atmosphere]
+                dvagdt[current_time_index,free_atmosphere] = dvagdt[current_time_index,free_atmosphere] - pvwpz[current_time_index,free_atmosphere]
+                duagdt[current_time_index,model_top] = duagdt[current_time_index,model_top] - puwpz[current_time_index,model_top]
+                dvagdt[current_time_index,model_top] = dvagdt[current_time_index,model_top] - pvwpz[current_time_index,model_top]
 
                 # Moisture
                 if moisture_processes_enabled:
-                    dr_vdt[current_time_index,model_bottom] = dr_vdt[current_time_index,model_bottom] - Quantity((pr_vwpz[current_time_index,model_bottom]), pthetawpz.units)
-                    dr_vdt[current_time_index,surface_layer] = dr_vdt[current_time_index,surface_layer] - Quantity((pr_vwpz[current_time_index,surface_layer]), pthetawpz.units)
-                    dr_vdt[current_time_index,boundary_layer] = dr_vdt[current_time_index,boundary_layer] - Quantity((pr_vwpz[current_time_index,boundary_layer]), pthetawpz.units)
-                    dr_vdt[current_time_index,free_atmosphere] = dr_vdt[current_time_index,free_atmosphere] - Quantity((pr_vwpz[current_time_index,free_atmosphere]), pthetawpz.units)
-                    dr_vdt[current_time_index,model_top] = dr_vdt[current_time_index,model_top] - Quantity((pr_vwpz[current_time_index,model_top]), pthetawpz.units)
+                    dr_vdt[current_time_index,model_bottom] = dr_vdt[current_time_index,model_bottom] - pr_vwpz[current_time_index,model_bottom]
+                    dr_vdt[current_time_index,surface_layer] = dr_vdt[current_time_index,surface_layer] - pr_vwpz[current_time_index,surface_layer]
+                    dr_vdt[current_time_index,boundary_layer] = dr_vdt[current_time_index,boundary_layer] - pr_vwpz[current_time_index,boundary_layer]
+                    dr_vdt[current_time_index,free_atmosphere] = dr_vdt[current_time_index,free_atmosphere] - pr_vwpz[current_time_index,free_atmosphere]
+                    dr_vdt[current_time_index,model_top] = dr_vdt[current_time_index,model_top] - pr_vwpz[current_time_index,model_top]
 
                 # Temperature
-                dthetadt[current_time_index,surface_layer] = dthetadt[current_time_index,surface_layer] - Quantity((pthetawpz[current_time_index,surface_layer]), pthetawpz.units)
-                dthetadt[current_time_index,boundary_layer] = dthetadt[current_time_index,boundary_layer] - Quantity((pthetawpz[current_time_index,boundary_layer]), pthetawpz.units)
-                dthetadt[current_time_index,free_atmosphere] = dthetadt[current_time_index,free_atmosphere] - Quantity((pthetawpz[current_time_index,free_atmosphere]), pthetawpz.units)
-                dthetadt[current_time_index,model_top] = dthetadt[current_time_index,model_top] - Quantity(pthetawpz[current_time_index,model_top], pthetawpz.units)
+                dthetadt[current_time_index,surface_layer] = dthetadt[current_time_index,surface_layer] - pthetawpz[current_time_index,surface_layer]
+                dthetadt[current_time_index,boundary_layer] = dthetadt[current_time_index,boundary_layer] - pthetawpz[current_time_index,boundary_layer]
+                dthetadt[current_time_index,free_atmosphere] = dthetadt[current_time_index,free_atmosphere] - pthetawpz[current_time_index,free_atmosphere]
+                dthetadt[current_time_index,model_top] = dthetadt[current_time_index,model_top] - pthetawpz[current_time_index,model_top]
 
 
         if radiation_schema!= 0:
             if radiation_schema == 1:
                 # Fetch absorbtion coefficients for each atmospheric layer from the included database
-                weighted_absorbtion_coefficients = dynamics.weighted_absorbtion_coefficients(e[current_time_index-1,:], p[current_time_index-1,:], air_absorbtion_coefficients[0], air_absorbtion_coefficients[1], air_absorbtion_coefficients[2], air_absorbtion_coefficients[3])
-                ozone_absorbtion_coeff = dynamics.ozone_absorbtion_coefficients(ozone_layer_average_ozone, ozone_layer_average_water_vapor, air_absorbtion_coefficients[0], air_absorbtion_coefficients[1], air_absorbtion_coefficients[2], air_absorbtion_coefficients[3], air_absorbtion_coefficients[4])
-        
+                weighted_absorbtion_coefficients = radiation.weighted_absorbtion_coefficients(e[current_time_index-1,:], p[current_time_index-1,:], air_absorbtion_coefficients[0], air_absorbtion_coefficients[1], air_absorbtion_coefficients[2], air_absorbtion_coefficients[3])
+                ozone_absorbtion_coeff = radiation.ozone_absorbtion_coefficients(ozone_layer_average_ozone, ozone_layer_average_water_vapor, air_absorbtion_coefficients[0], air_absorbtion_coefficients[1], air_absorbtion_coefficients[2], air_absorbtion_coefficients[3], air_absorbtion_coefficients[4])
+
                 # Radiative transfer
-                M_in = dynamics.ground_incoming_shortwave(((physics.r_sun**2 * dynamics.spectral_exitance(np.array([5773], ndmin=0), nu[:].m)) / physics.D_sun**2), current_model_state_time_local, lat, shortwave_reduction[current_time_index-1])
-                SW_in[current_time_index] = dynamics.irradiance(M_in.m)
-                I[current_time_index,:] = dynamics.irradiance(dynamics.point_to_point_exitance(T[current_time_index-1,:].data,depth[:].data,soil_emissivity, weighted_absorbtion_coefficients[:,:].data, nu[:].m, M_in.m, ozone_absorbtion_coeff.data, ozone_layer_temp.m, ozone_layer_depth.m))
+                M_in = radiation.ground_incoming_shortwave(((constants.r_sun**2 * solar_exitance) / constants.D_sun**2), current_model_state_time_local, lat, shortwave_reduction[current_time_index-1])
+                SW_in[current_time_index] = radiation.irradiance(M_in)
+                I[current_time_index,:] = radiation.irradiance(radiation.point_to_point_exitance(T[current_time_index-1,:], depth[:], soil_emissivity, weighted_absorbtion_coefficients[:,:], nu[:], M_in, ozone_absorbtion_coeff, ozone_layer_temp, ozone_layer_depth))
 
                 # Rates of change
                 # Temperature
-                dTdt[current_time_index,model_bottom] = dTdt[current_time_index,model_bottom] + (1/(soil_density * soil_heat_capacity * soil_depth)) * (- dynamics.sensible_heat(p[current_time_index-1,1], T[current_time_index-1,1], u_star[current_time_index], theta_star[current_time_index]) + Quantity(I[current_time_index,model_bottom], I.units))
-                dTdt[current_time_index,1] = dTdt[current_time_index,1] + (1/(rho[current_time_index-1,1] * physics.c_p * Quantity(depth[1], depth.units))) * (dynamics.sensible_heat(p[current_time_index-1,1], T[current_time_index-1,1], u_star[current_time_index], theta_star[current_time_index]) + Quantity(I[current_time_index,1], I.units))
-                dTdt[current_time_index,above_ground] = dTdt[current_time_index,above_ground] + ((1/(rho[current_time_index-1,above_ground] * physics.c_p * Quantity(depth[above_ground], depth.units))) * Quantity(I[current_time_index,above_ground], I.units))
-                dTdt[current_time_index,boundary_layer] = dTdt[current_time_index,boundary_layer] + ((1/(rho[current_time_index-1,boundary_layer] * physics.c_p * Quantity(depth[boundary_layer], depth.units))) * Quantity(I[current_time_index,boundary_layer], I.units))
-                dTdt[current_time_index,free_atmosphere] = dTdt[current_time_index,free_atmosphere] + ((1/(rho[current_time_index-1,free_atmosphere] * physics.c_p * Quantity(depth[free_atmosphere], depth.units))) * Quantity(I[current_time_index,free_atmosphere], I.units))
-                dTdt[current_time_index,model_top] = dTdt[current_time_index,model_top] + ((1/(rho[current_time_index-1,model_top] * physics.c_p * Quantity(depth[model_top], depth.units))) * Quantity(I[current_time_index,model_top], I.units))
+                dTdt[current_time_index,model_bottom] = dTdt[current_time_index,model_bottom] + (1/(soil_density * soil_heat_capacity * soil_depth)) * (- turbulence.sensible_heat(p[current_time_index-1,1], T[current_time_index-1,1], u_star[current_time_index], theta_star[current_time_index])[0] + I[current_time_index,model_bottom])
+                dTdt[current_time_index,1] = dTdt[current_time_index,1] + (1/(rho[current_time_index-1,1] * constants.c_p * depth[1])) * (turbulence.sensible_heat(p[current_time_index-1,1], T[current_time_index-1,1], u_star[current_time_index], theta_star[current_time_index])[0] + I[current_time_index,1])
+                dTdt[current_time_index,above_ground] = dTdt[current_time_index,above_ground] + ((1/(rho[current_time_index-1,above_ground] * constants.c_p * depth[above_ground])) * I[current_time_index,above_ground])
+                dTdt[current_time_index,boundary_layer] = dTdt[current_time_index,boundary_layer] + ((1/(rho[current_time_index-1,boundary_layer] * constants.c_p * depth[boundary_layer])) * I[current_time_index,boundary_layer])
+                dTdt[current_time_index,free_atmosphere] = dTdt[current_time_index,free_atmosphere] + ((1/(rho[current_time_index-1,free_atmosphere] * constants.c_p * depth[free_atmosphere])) * I[current_time_index,free_atmosphere])
+                dTdt[current_time_index,model_top] = dTdt[current_time_index,model_top] + ((1/(rho[current_time_index-1,model_top] * constants.c_p * depth[model_top])) * I[current_time_index,model_top])
 
         # Sum the contributions to the mean wind
-        dudt[current_time_index,:] = Quantity(duagdt[current_time_index,:], duagdt.units) + Quantity(dugdt[current_time_index,:], dugdt.units)
-        dvdt[current_time_index,:] = Quantity(dvagdt[current_time_index,:], dvagdt.units) + Quantity(dvgdt[current_time_index,:], dvgdt.units)
+        dudt[current_time_index,:] = duagdt[current_time_index,:] + dugdt[current_time_index,:]
+        dvdt[current_time_index,:] = dvagdt[current_time_index,:] + dvgdt[current_time_index,:]
 
         # Calculate the new primary model values
         # Pressure
-        p[current_time_index,:] = Quantity(p[current_time_index-1,:], p.units) + timestep.to("s") * Quantity(dpdt[current_time_index,:], dpdt.units)
+        p[current_time_index,:] = p[current_time_index-1,:] + timestep * dpdt[current_time_index,:]
 
         # Winds
-        u_ag[current_time_index,:] = Quantity(u_ag[current_time_index-1,:], u_ag.units) + timestep.to("s") * Quantity(duagdt[current_time_index,:], duagdt.units)
-        v_ag[current_time_index,:] = Quantity(v_ag[current_time_index-1,:], v_ag.units) + timestep.to("s") * Quantity(dvagdt[current_time_index,:], dvagdt.units)
-        u_g[current_time_index,:] = Quantity(u_g[current_time_index-1,:], u_g.units) + timestep.to("s") * Quantity(dugdt[current_time_index,:], dugdt.units)
-        v_g[current_time_index,:] = Quantity(v_g[current_time_index-1,:], v_g.units) + timestep.to("s") * Quantity(dvgdt[current_time_index,:], dvgdt.units)
-        u_bar[current_time_index,:] = Quantity(u_bar[current_time_index-1,:], u_bar.units) + timestep.to("s") * Quantity(dudt[current_time_index,:], dudt.units)
-        v_bar[current_time_index,:] = Quantity(v_bar[current_time_index-1,:], v_bar.units) + timestep.to("s") * Quantity(dvdt[current_time_index,:], dvdt.units)
+        u_ag[current_time_index,:] = u_ag[current_time_index-1,:] + timestep * duagdt[current_time_index,:]
+        v_ag[current_time_index,:] = v_ag[current_time_index-1,:] + timestep * dvagdt[current_time_index,:]
+        u_g[current_time_index,:] = u_g[current_time_index-1,:] + timestep * dugdt[current_time_index,:]
+        v_g[current_time_index,:] = v_g[current_time_index-1,:] + timestep * dvgdt[current_time_index,:]
+        u_bar[current_time_index,:] = u_bar[current_time_index-1,:] + timestep * dudt[current_time_index,:]
+        v_bar[current_time_index,:] = v_bar[current_time_index-1,:] + timestep * dvdt[current_time_index,:]
 
         # Moisture
-        r_v[current_time_index,:] = Quantity(r_v[current_time_index-1,:], r_v.units) + timestep.to("s") * Quantity(dr_vdt[current_time_index,:], dr_vdt.units)
-        e[current_time_index,:] = dynamics.e_from_r_v(r_v[current_time_index,:], p[current_time_index,:])
+        r_v[current_time_index,:] = r_v[current_time_index-1,:] + timestep * dr_vdt[current_time_index,:]
+        e[current_time_index,:] = thermo.e_from_r_v(r_v[current_time_index,:], p[current_time_index,:])
 
         # Temperature
-        theta[current_time_index,:] = Quantity(theta[current_time_index-1,:], theta.units) + timestep.to("s") * Quantity(dthetadt[current_time_index,:], dthetadt.units) + dynamics.poissons_T_to_theta(timestep.to("s") * Quantity(dTdt[current_time_index,:], dTdt.units), p[current_time_index-1,:], r_v[current_time_index-1,:])
-        T[current_time_index,:] = dynamics.poissons_theta_to_T(theta[current_time_index,:], p[current_time_index,:], r_v[current_time_index,:])
+        theta[current_time_index,:] = theta[current_time_index-1,:] + timestep * dthetadt[current_time_index,:] + thermo.poissons_T_to_theta(timestep * dTdt[current_time_index,:], p[current_time_index-1,:], r_v[current_time_index-1,:])
+        T[current_time_index,:] = thermo.poissons_theta_to_T(theta[current_time_index,:], p[current_time_index,:], r_v[current_time_index,:])
 
         # Density
-        rho[current_time_index,:] = p[current_time_index,:]/(physics.R_d * T[current_time_index,:] * (1 + 0.608 * r_v[current_time_index,:]))
+        rho[current_time_index,:] = p[current_time_index,:]/(constants.R_d * T[current_time_index,:] * (1 + 0.608 * r_v[current_time_index,:]))
 
         # Cloud Fraction?
         shortwave_reduction[current_time_index] = shortwave_reduction[current_time_index-1]
@@ -585,24 +400,28 @@ def run_model(config : dict, prepared_filename : str, **kwargs) -> str:
         if boundary_layer_height_schema != 0:
             if boundary_layer_height_schema in [1, 2]:
                 # Calculate new PBL depth
-                dz_idt[current_time_index] = dynamics.boundary_layer_height_tendency(u_star[current_time_index], theta_star[current_time_index], theta[current_time_index-1,:], z[:], theta[current_time_index-1,0], z_s[current_time_index-1], z_i[current_time_index-1], z_0, lat)
-                z_i[current_time_index] = z_i[current_time_index-1] + dz_idt[current_time_index] * timestep.to("s")
+                dz_idt[current_time_index] = turbulence.boundary_layer_height_tendency(u_star[current_time_index], theta_star[current_time_index], theta[current_time_index-1,:], z[:], theta[current_time_index-1,0], z_s[current_time_index-1], z_i[current_time_index-1], z_0, lat)
+                z_i[current_time_index] = z_i[current_time_index-1] + dz_idt[current_time_index] * timestep
                 
                 # Clip within the model
-                if z_i[current_time_index] > (z[-1] - Quantity(25, "m")):
-                    z_i[current_time_index] = (z[-1] - Quantity(25, "m"))
-                elif z_i[current_time_index] < Quantity(25, "m"):
-                    z_i[current_time_index] = Quantity(25, "m")
+                if boundary_layer_height_schema != 2:
+                    if z_i[current_time_index] <= z_s[current_time_index]:
+                        z_i[current_time_index] = z_i[current_time_index] + 1
+                
+                if z_i[current_time_index] > (z[-1] - 25):
+                    z_i[current_time_index] = (z[-1] - 25)
+                elif z_i[current_time_index] < 25:
+                    z_i[current_time_index] = 25
             
                 if boundary_layer_height_schema == 2:
                     # Calculate new surface layer depth
                     z_s[current_time_index] = z_i[current_time_index] / 10
 
                     # Clip within the model
-                    if z_s[current_time_index] > (z[-1] - Quantity(25, "m")):
-                        z_s[current_time_index] = (z[-1] - Quantity(25, "m"))
-                    elif z_s[current_time_index] < Quantity(25, "m"):
-                        z_s[current_time_index] = Quantity(25, "m")
+                    if z_s[current_time_index] > (z[-1] - 25):
+                        z_s[current_time_index] = (z[-1] - 25)
+                    elif z_s[current_time_index] < 25:
+                        z_s[current_time_index] = 25
                 else:
                     z_s[current_time_index] = z_s[0]
         else:
@@ -610,12 +429,58 @@ def run_model(config : dict, prepared_filename : str, **kwargs) -> str:
 
 
         if progress_tracker:
-            progress(total_time, timestep.to("s"), current_time_index)
+            progress(total_time, timestep, current_time_index)
     
+    Dataset = NCDF(output_filename, "r+", format = "NETCDF4")
+    Dataset["pressure"][:,:] = p[:,:]
+    Dataset["dpdt"][:,:] = dpdt[:,:]
+    Dataset["temperature"][:,:] = T[:,:]
+    Dataset["density"][:,:] = rho[:,:]
+    Dataset["potential_temperature"][:,:] = theta[:,:]
+    Dataset["mixing_ratio"][:,:] = r_v[:,:]
+    Dataset["vapor_pressure"][:,:] = e[:,:]
+    Dataset["dr_vdt"][:,:] = dr_vdt[:,:]
+    Dataset["u-component_of_ageostrophic_wind"][:,:] = u_ag[:,:]
+    Dataset["v-component_of_ageostrophic_wind"][:,:] = v_ag[:,:]
+    Dataset["u-component_of_geostrophic_wind"][:,:] = u_g[:,:]
+    Dataset["v-component_of_geostrophic_wind"][:,:] = v_g[:,:]
+    Dataset["u-component_of_mean_wind"][:,:] = u_bar[:,:]
+    Dataset["v-component_of_mean_wind"][:,:] = v_bar[:,:]
+    Dataset["duagdt"][:,:] = duagdt[:,:]
+    Dataset["dvagdt"][:,:] = dvagdt[:,:]
+    Dataset["dugdt"][:,:] = dugdt[:,:]
+    Dataset["dvgdt"][:,:] = dvgdt[:,:]
+    Dataset["dudt"][:,:] = dudt[:,:]
+    Dataset["dvdt"][:,:] = dvdt[:,:]
+    Dataset["dthetadt"][:,:] = dthetadt[:,:]
+    Dataset["dTdt"][:,:] = dTdt[:,:]
+    Dataset["surface_layer_height"][:] = z_s[:]
+    Dataset["pbl_top_height"][:] = z_i[:]
+    Dataset["dz_idt"][:] = dz_idt[:]
+    Dataset["u-momentum_flux"][:,:] = uw[:,:]
+    Dataset["v-momentum_flux"][:,:] = vw[:,:]
+    Dataset["potential_temperature_flux"][:,:] = thetaw[:,:]
+    Dataset["moisture_flux"][:,:] = r_vw[:,:]
+    Dataset["eddy_momentum_diffusivity"][:,:] = K_m[:,:]
+    Dataset["eddy_heat_diffusivity"][:,:] = K_h[:,:]
+    Dataset["differential_u-momentum_flux"][:,:] = puwpz[:,:]
+    Dataset["differential_v-momentum_flux"][:,:] = pvwpz[:,:]
+    Dataset["differential_potential_temperature_flux"][:,:] = pthetawpz[:,:]
+    Dataset["differential_moisture_flux"][:,:] = pr_vwpz[:,:]
+    Dataset["time"][:] = time[:]
+    Dataset["model_time"][:] = model_time[:]
+    Dataset["shortwave_reduction"][:] = shortwave_reduction[:]
+    Dataset["incoming_solar_radiation"][:] = SW_in[:]
+    Dataset["net_irradiance"][:,:] = I[:,:]
+    Dataset["u_star"][:] = u_star[:]
+    Dataset["theta_star"][:] = theta_star[:]
+    Dataset["r_v_star"][:] = r_v_star[:]
+    Dataset["monin_obukhov_length_scale"][:] = L[:]
     Dataset.close()
+    
     duration = (datetime.now(timezone("UTC")) - runtime).total_seconds()
     print(f"\n   Model run completed in {int(duration // 3600):02d}:{int((duration % 3600) // 60):02d}:{int(duration % 60):02d}.")
-    print(f"   Model efficiency: 1:{(total_time.to('s').m/duration):03.1f}")
+    print(f"   Model efficiency: 1:{(total_time/duration):03.1f}")
     return output_filename
 
 
@@ -630,18 +495,19 @@ if __name__ == "__main__":
     
     #input_filename = ingest.ingest_previous_run("PBL_MODEL_OUTPUT_2025-10-23_08-17-32.nc", "continue", time = Quantity(3.5, "hr"))
 
-    sounding_datetime = datetime(2025, 10, 25, 12).replace(tzinfo = timezone("UTC"))
-    sounding_station = "BMX"
+    sounding_datetime = datetime(2025, 10, 25, 12)#.replace(tzinfo = timezone("UTC"))
+    sounding_station = "72230"
     input_filename = ingest.ingest_sounding(config, sounding_datetime, sounding_station)
 
     #input_filename = "SABRES-PBL-Model\PBL_MODEL_INPUT_2025-12-23_16-03-18.nc"
 
     output_filename = run_model(config, input_filename)#, progress_tracker = False)
 
-    plot_timeseries(output_filename)
-    plot_radiation(output_filename)
-    gif.make_gif(output_filename)
+    #figures.plot_timeseries(output_filename, config)
+    figures.plot_radiation(output_filename)
+    figures.make_gif(output_filename)
 
-    #plot_timeseries("SABRES-PBL-Model\PBL_MODEL_OUTPUT_2025-11-19_13-39-17.nc")
-    #plot_radiation("SABRES-PBL-Model\PBL_MODEL_OUTPUT_2025-11-19_13-39-17.nc")
-    #gif.make_gif("SABRES-PBL-Model\PBL_MODEL_OUTPUT_2025-11-19_13-39-17.nc")
+    #figures.plot_timeseries("SABRES-PBL-Model\PBL_MODEL_OUTPUT_2025-11-19_13-39-17.nc")
+    #figures.plot_radiation("SABRES-PBL-Model\PBL_MODEL_OUTPUT_2025-11-19_13-39-17.nc")
+
+    #figures.make_gif("D:\CodeProjects\PBLModeling\PBL_MODEL_OUTPUT_2026-02-03_11-45-49.nc")
